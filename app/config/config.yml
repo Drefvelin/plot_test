@@ -1,0 +1,77 @@
+window:
+  width: 1280
+  height: 720
+  title: "Voronoi Plot"
+
+diagram:
+  width: 1024
+  height: 1024
+  radius: 512
+
+world:
+  pixels_per_unit: 10   # 10 screen pixels = 1 world unit
+
+plots:
+  min_area: 50          # square units (minimum plot area)
+  max_area: 200         # square units (maximum plot area)
+  max_depth_to_front_ratio: 1.5   # neither side may exceed 1.5x the other
+  frontage_setback: 2.0           # front row sits this many units inside the cell from the road
+
+voronoi:
+  scale: 0.4
+  seed: 42
+
+town:
+  seed: 12345
+
+terrain:
+  image: assets/terrain.png
+  colors: app/config/terrain.txt
+  grid_size: 128
+  simplify_tolerance: 20.0
+  water_inset: 2.0
+  shore_inset: 2.0
+  contour_width: 1.0
+  clip_roads_at_water: true
+  corridor_roads_enabled: true
+  shore_road_inset: 20.0
+  river_road_inset: 20.0
+  corridor_edge_spacing: 80.0
+  corridor_parallel_probe_offset: 4.0
+  corridor_parallel_cos: 0.98
+  bridges_enabled: true
+  bridge_snap_enabled: true
+  bridge_snap_search_radius: 8.0
+
+colors:
+  inside:  [255, 255, 255]
+  outside: [140, 140, 140]
+  edges:   [0, 0, 0]
+  secondary_edges: [0, 160, 0]
+  bridge: [139, 90, 43]
+
+debug:
+  highlight_cell: -1     # -1 off, -2 all cells, or a specific cell id
+  highlight_color: [128, 128, 128]
+
+logging:
+  directory: logs
+  files:
+    - channel: app
+      filename: app.log
+    - channel: voronoi
+      filename: voronoi.log
+    - channel: render
+      filename: render.log
+    - channel: placement
+      filename: placement.log
+    - channel: segments
+      filename: segments.log
+    - channel: probe
+      filename: probe.log
+    - channel: layout
+      filename: layout.log
+    - channel: points
+      filename: points.log
+    - channel: terrain
+      filename: terrain.log

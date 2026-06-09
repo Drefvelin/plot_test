@@ -1,0 +1,95 @@
+# Building definitions: zone type, display colour, and building mix per plot.
+# Each plot type lists how many buildings of each size sit on one lot.
+# Counts may be a fixed integer (1) or a range ("1-2", or min/max map).
+buildings:
+  house:
+    type: residential
+    rgb: [220, 180, 140]
+    buildings:
+      small: 1
+  church:
+    type: urban
+    fill_in: false           # never placed via segment gap-fill
+    allow_plot_fill: false   # gap-fill cannot overlap this lot (yard/graveyard protected)
+    rgb: [160, 160, 210]
+    buildings:
+      huge: 1
+      tiny: 0-2
+  farm:
+    type: rural
+    rgb: [140, 190, 120]
+    movable: true
+    buildings:
+      large: 1
+      medium: 1
+      small: 1-2
+  resource:
+    type: rural
+    rgb: [190, 160, 90]
+    movable: true
+    buildings:
+      small: 1
+      tiny: 2-3
+  workshop:
+    type: urban
+    rgb: [180, 140, 100]
+    buildings:
+      small: 1
+      tiny: 1-2
+
+# Footprint of a single building rectangle (roughly 1/5 of the matching plot band).
+building_templates:
+  tiny:
+    size:
+      min_area: 40
+      max_area: 60
+    conditions:
+      - long_facing_middle
+      - door_long
+      - edge_placement
+      - corner_placement
+      - diagonal_allowed
+  small:
+    size:
+      min_area: 60
+      max_area: 120
+    conditions:
+      - edge_placement
+      - corner_placement
+  medium:
+    size:
+      min_area: 120
+      max_area: 200
+    conditions:
+      - edge_placement
+  large:
+    size:
+      min_area: 200
+      max_area: 350
+    conditions:
+      - edge_placement
+  huge:
+    size:
+      min_area: 350
+      max_area: 600
+    conditions:
+      - door_short
+      - middle_placement
+
+# Whole road-facing lot including yard / open space around the buildings.
+plot_sizes:
+  tiny:
+    min_area: 150
+    max_area: 250
+  small:
+    min_area: 250
+    max_area: 400
+  medium:
+    min_area: 400
+    max_area: 600
+  large:
+    min_area: 600
+    max_area: 900
+  huge:
+    min_area: 900
+    max_area: 1500

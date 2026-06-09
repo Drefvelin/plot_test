@@ -1,0 +1,13 @@
+build/
+logs/*.log
+.vs/
+*.user
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.sln
+*.vcxproj*
+x64/
+Release/
+Debug/
+_deps/
