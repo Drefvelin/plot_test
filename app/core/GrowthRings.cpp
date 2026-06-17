@@ -6,8 +6,10 @@
 #include "FrontagePlacement.h"
 #include "FrontageZones.h"
 #include "Logger.h"
+#include "PlacementFrontier.h"
 #include "PlacementPrep.h"
 #include "PlotGeometry.h"
+#include "Profile.h"
 #include "RoadExhaustion.h"
 #include "SecondaryRoadPlacement.h"
 #include "Units.h"
@@ -163,6 +165,11 @@ void logRingState(const Town& town) {
 }
 
 void bumpGrowthRings(Town& town) {
+    PROFILE_SCOPE(ProfileScopeId::RingBump);
+    const float prevSuburbanDist = suburbanMaxDist(town);
+    const float prevCoreDist =
+        town.urbanCoreMaxHop >= 0 ? urbanCoreMaxDist(town) : -1.f;
+
     town.urbanCoreMaxHop = town.suburbanMaxHop - 1;
     town.suburbanMaxHop += 1;
     town.ringPhase       = RingPhase::DensifyCore;
@@ -171,7 +178,8 @@ void bumpGrowthRings(Town& town) {
                 "ring_bump: urban_core=0-" + std::to_string(town.urbanCoreMaxHop)
                     + " suburban=0-" + std::to_string(town.suburbanMaxHop)
                     + " suburban_dist=" + std::to_string(static_cast<int>(suburbanMaxDist(town)))
-                    + " phase=DensifyCore alley_state=preserved");
+                    + " phase=DensifyCore wall_resync=on_zone_change");
+    frontierExtendBands(town, prevSuburbanDist, prevCoreDist);
 }
 
 void clearAlleyStateForRoad(Town& town, int roadId) {
@@ -357,18 +365,12 @@ bool tryPlaceOnCoreRoad(Town& town, BuildingInstance& instance, const DefCache& 
 
 bool hasUncheckedAlleyGapsInCore(Town& town, const TownConfig& townCfg,
                                  const std::vector<int>& junctionHops) {
+    (void)junctionHops;
     if (town.urbanCoreMaxHop < 0) {
         return false;
     }
-
-    std::vector<WallGap> gaps;
-    collectWallGapsInDistRange(town, townCfg.minWallGapForAlley, urbanCoreMaxDist(town), gaps);
-    for (const WallGap& gap : gaps) {
-        if (!isAlleyGapChecked(town, gap)) {
-            return true;
-        }
-    }
-    return false;
+    return placementFrontierHasUncheckedAlleyInCore(town, townCfg.minWallGapForAlley,
+                                                    urbanCoreMaxDist(town));
 }
 
 bool isUrbanCoreSaturated(Town& town, const TownConfig& townCfg, const DefCache& defs,
@@ -441,7 +443,7 @@ bool tryPlaceInUrbanCore(Town& town, BuildingInstance& instance, const DefCache&
     const auto tryAlleyAddAndFill = [&](int hostRoadId) -> bool {
         int newRoadIdLocal = -1;
         if (!tryAddSecondaryRoad(town, instance.id, plots.frontageSetback, townCfg, defs, searchLog,
-                                 newRoadIdLocal, hostRoadId, junctionHops, townSeed)) {
+                                 newRoadIdLocal, hostRoadId, junctionHops, townSeed, terrain)) {
             return false;
         }
         indexJunctions(town);
@@ -509,55 +511,47 @@ bool tryPlaceSuburbanOnRoads(Town& town, BuildingInstance& instance, const DefCa
                              PlacementSearchLog& searchLog, const TerrainAtlas* terrain,
                              const std::vector<int>& junctionHops, const PlacementPrep& prep,
                              RoadAttemptMemo& memo) {
-    const std::vector<int>& roads = getCachedSuburbanRoadIds(town, town.suburbanMaxHop);
-
-    std::vector<float> distList;
-    distList.reserve(roads.size());
-    for (int roadId : roads) {
-        if (roadId >= 0 && roadId < static_cast<int>(town.roads.size())) {
-            distList.push_back(roadMidpointCenterDist(
-                town, town.roads[static_cast<std::size_t>(roadId)]));
-        } else {
-            distList.push_back(0.f);
-        }
-    }
+    (void)junctionHops;
+    (void)memo;
 
     Logger::log("layout",
                 "ring_road_list: queueIndex=" + std::to_string(instance.id) + " suburban_max="
                     + std::to_string(town.suburbanMaxHop) + " suburban_dist="
-                    + std::to_string(static_cast<int>(suburbanMaxDist(town))) + " count="
-                    + std::to_string(roads.size()));
+                    + std::to_string(static_cast<int>(suburbanMaxDist(town)))
+                    + " mode=frontier");
 
-    if (roads.empty()) {
-        return false;
-    }
-
-    for (std::size_t i = 0; i < roads.size(); ++i) {
-        const int   roadId = roads[i];
-        const float dist   = distList[i];
-
-        if (skipRoadForPlacement(town, defs, instance.buildingType, roadId, junctionHops)) {
-            continue;
-        }
-
-        resetPlacementSearchLog(searchLog);
-        if (tryPlaceOnSuburbanRoad(town, instance, defs, plots, townSeed, maxBuildings, searchLog,
-                                   terrain, roadId, junctionHops, prep, memo)) {
-            return true;
-        }
-
+    const BandFilter suburbanFilter = BandFilter::suburban(town);
+    resetPlacementSearchLog(searchLog);
+    if (!tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance, prep, townSeed,
+                          maxBuildings, searchLog, terrain, suburbanFilter, -1)) {
         const std::string summary = searchLog.resultSummary.empty()
                                         ? "placement_failed"
                                         : searchLog.resultSummary;
         Logger::log("layout",
-                    "ring_road_fail: queueIndex=" + std::to_string(instance.id) + " roadId="
-                        + std::to_string(roadId) + " dist="
-                        + std::to_string(static_cast<int>(dist)) + " idx="
-                        + std::to_string(i + 1) + "/" + std::to_string(roads.size())
+                    "ring_road_fail: queueIndex=" + std::to_string(instance.id)
                         + " summary=" + summary);
+        return false;
     }
 
-    return false;
+    const int logRoadId = instance.placementMode == BuildingPlacementMode::SegmentGapFill
+                              ? instance.roadId
+                              : instance.plot.roadId;
+    const int hops = roadHop(town, logRoadId, junctionHops);
+    const float roadDist =
+        (logRoadId >= 0 && logRoadId < static_cast<int>(town.roads.size()))
+            ? roadMidpointCenterDist(town, town.roads[static_cast<std::size_t>(logRoadId)])
+            : 0.f;
+    const char* mode =
+        instance.placementMode == BuildingPlacementMode::SegmentGapFill ? "gap_fill" : "plot_lot";
+    Logger::log("layout",
+                "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
+                    + instance.buildingType + " roadHop=" + std::to_string(hops) + " roadDist="
+                    + std::to_string(static_cast<int>(roadDist)) + " roadId="
+                    + std::to_string(logRoadId) + " suburban_max="
+                    + std::to_string(town.suburbanMaxHop) + " urban_core="
+                    + std::to_string(town.urbanCoreMaxHop) + " phase="
+                    + ringPhaseLabel(town.ringPhase) + " mode=" + mode + " band=suburban");
+    return true;
 }
 
 bool tryPlaceRuralOnRoads(Town& town, BuildingInstance& instance, const DefCache& defs,
@@ -565,72 +559,36 @@ bool tryPlaceRuralOnRoads(Town& town, BuildingInstance& instance, const DefCache
                           PlacementSearchLog& searchLog, const TerrainAtlas* terrain,
                           const std::vector<int>& junctionHops, const PlacementPrep& prep,
                           RoadAttemptMemo& memo) {
-    const std::vector<int>& roads = getCachedRuralRoadIds(town, town.suburbanMaxHop);
-
-    std::vector<float> distList;
-    distList.reserve(roads.size());
-    for (int roadId : roads) {
-        if (roadId >= 0 && roadId < static_cast<int>(town.roads.size())) {
-            distList.push_back(roadMidpointCenterDist(
-                town, town.roads[static_cast<std::size_t>(roadId)]));
-        } else {
-            distList.push_back(0.f);
-        }
-    }
+    (void)memo;
 
     Logger::log("layout",
                 "ring_rural_list: queueIndex=" + std::to_string(instance.id) + " suburban_max="
                     + std::to_string(town.suburbanMaxHop) + " suburban_dist="
-                    + std::to_string(static_cast<int>(suburbanMaxDist(town))) + " count="
-                    + std::to_string(roads.size()));
-
-    if (roads.empty()) {
-        return false;
-    }
+                    + std::to_string(static_cast<int>(suburbanMaxDist(town)))
+                    + " mode=frontier");
 
     const BandFilter ruralFilter = BandFilter::rural(town);
-
-    for (std::size_t i = 0; i < roads.size(); ++i) {
-        const int   roadId = roads[i];
-        const float dist   = distList[i];
-
-        memo.syncContext(town);
-        if (memo.shouldSkipRoad(roadId)) {
-            continue;
-        }
-        if (skipRoadForPlacement(town, defs, instance.buildingType, roadId, junctionHops)) {
-            continue;
-        }
-
-        resetPlacementSearchLog(searchLog);
-        if (tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance, prep, townSeed,
-                             maxBuildings, searchLog, terrain, ruralFilter, roadId)) {
-            const int placedHop = roadHop(town, instance.plot.roadId, junctionHops);
-            const float placedDist = roadMidpointCenterDist(
-                town, town.roads[static_cast<std::size_t>(instance.plot.roadId)]);
-            Logger::log("layout",
-                        "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
-                            + instance.buildingType + " roadHop=" + std::to_string(placedHop)
-                            + " roadDist=" + std::to_string(static_cast<int>(placedDist))
-                            + " suburban_max=" + std::to_string(town.suburbanMaxHop)
-                            + " mode=rural");
-            return true;
-        }
-
-        memo.recordFailure(roadId);
-
+    resetPlacementSearchLog(searchLog);
+    if (!tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance, prep, townSeed,
+                          maxBuildings, searchLog, terrain, ruralFilter, -1)) {
         const std::string summary = searchLog.resultSummary.empty()
                                         ? "placement_failed"
                                         : searchLog.resultSummary;
         Logger::log("layout",
-                    "ring_road_fail: queueIndex=" + std::to_string(instance.id) + " roadId="
-                        + std::to_string(roadId) + " dist="
-                        + std::to_string(static_cast<int>(dist)) + " idx="
-                        + std::to_string(i + 1) + "/" + std::to_string(roads.size())
-                        + " summary=" + summary);
+                    "ring_rural_fail: queueIndex=" + std::to_string(instance.id) + " summary="
+                        + summary);
+        return false;
     }
 
-    return false;
+    const int placedHop = roadHop(town, instance.plot.roadId, junctionHops);
+    const float placedDist = roadMidpointCenterDist(
+        town, town.roads[static_cast<std::size_t>(instance.plot.roadId)]);
+    Logger::log("layout",
+                "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
+                    + instance.buildingType + " roadHop=" + std::to_string(placedHop)
+                    + " roadDist=" + std::to_string(static_cast<int>(placedDist))
+                    + " suburban_max=" + std::to_string(town.suburbanMaxHop) + " mode=rural");
+    return true;
 }
 
 void rebuildHopDebugRoadMesh(Town& town, const std::vector<int>& junctionHops, float pixelsPerUnit) {

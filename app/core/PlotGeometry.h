@@ -17,12 +17,6 @@ float maxPlotDepthToRoadHit(const Vec2& roadStart, const Vec2& edgeDir, float fr
                             const Vec2& inward, float setback, int hostRoadId, int bankIndex,
                             Town& town);
 void invalidateRoadTopologyCaches(Town& town);
-void invalidateWallSpanCacheForBank(Town& town, int roadId, int bankIndex);
-void getCachedBuildingWallSpans(Town& town, int roadId, int bankIndex, const Vec2& origin,
-                                const Vec2& edgeDir, float roadLen,
-                                std::vector<RoadWallSpan>& outSpans);
-void gapsFromOccupiedSpans(const std::vector<RoadWallSpan>& occupied, float roadLen,
-                           float minGapWidth, std::vector<RoadWallSpan>& outGaps);
 bool plotPlacementValid(const Plot& plot, const Town& town, const TerrainAtlas* terrain,
                         float setback, int hostRoadId);
 bool plotsOverlap(const Plot& a, const Plot& b);
@@ -34,6 +28,17 @@ Vec2 instancePlacementPoint(const BuildingInstance& instance);
 bool overlapsInstances(const Plot& plot, const std::vector<BuildingInstance>& instances);
 bool footprintOverlapsMains(const BuildingFootprint& footprint, const Town& town,
                             const DefCache& defs);
+bool footprintOverlapsMainsOnBank(const BuildingFootprint& footprint, const Town& town,
+                                  const DefCache& defs, int roadId, int bankIndex,
+                                  const std::vector<int>* otherRoadPlotCandidates = nullptr);
+bool segmentIntersectsFootprint(const Vec2& a, const Vec2& b, const BuildingFootprint& fp);
+void rebuildMainOccupancyForBank(Town& town, int roadId, int bankIndex);
+void rebuildAllMainOccupancyT(Town& town);
+void rebuildSecondaryRoadIdList(Town& town);
+void collectOtherRoadPlotCandidatesForGap(const Town& town, int roadId, int bankIndex,
+                                          const Vec2& origin, const Vec2& edgeDir,
+                                          const Vec2& inward, float gapStart, float gapEnd,
+                                          float maxDepth, std::vector<int>& out);
 float footprintTMin(const BuildingFootprint& footprint, const Vec2& origin, const Vec2& edgeDir);
 float footprintTMax(const BuildingFootprint& footprint, const Vec2& origin, const Vec2& edgeDir);
 float plotTMin(const Plot& plot, const Vec2& origin, const Vec2& edgeDir);
@@ -53,6 +58,8 @@ struct WallGap {
     float gapMidT() const { return (tMin + tMax) * 0.5f; }
     Vec2  gapMidPoint() const { return origin + edgeDir * gapMidT(); }
 };
+
+WallGap wallGapFromSegment(const Road& road, int bankIndex, const RoadFrontageSegment& segment);
 
 struct AlleySegmentCandidate {
     Vec2 start{};
@@ -83,12 +90,6 @@ enum class AlleyQualityReject {
     BankParallel,
 };
 
-void collectBuildingWallSpansOnSide(const Town& town, int roadId, int bankIndex,
-                                    const Vec2& origin, const Vec2& edgeDir,
-                                    std::vector<RoadWallSpan>& out);
-void collectWallGapsOnSide(Town& town, int roadId, int bankIndex, const Vec2& origin,
-                           const Vec2& edgeDir, float roadLen, float minGapWidth,
-                           std::vector<RoadWallSpan>& outGaps);
 void collectAllPrimaryWallGaps(Town& town, float minGapWidth, std::vector<WallGap>& out);
 void collectWallGapsInDistRange(Town& town, float minGapWidth, float maxDistInclusive,
                                 std::vector<WallGap>& out);

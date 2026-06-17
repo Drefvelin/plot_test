@@ -47,6 +47,34 @@ const char* profileScopeName(ProfileScopeId id) {
         return "MeshRebuild";
     case ProfileScopeId::TerrainBake:
         return "TerrainBake";
+    case ProfileScopeId::SyncAlleyCleanup:
+        return "SyncAlleyCleanup";
+    case ProfileScopeId::PlacementPrep:
+        return "PlacementPrep";
+    case ProfileScopeId::RingBump:
+        return "RingBump";
+    case ProfileScopeId::GapFillCollect:
+        return "GapFillCollect";
+    case ProfileScopeId::GapFillTrySlot:
+        return "GapFillTrySlot";
+    case ProfileScopeId::PlotTrySegment:
+        return "PlotTrySegment";
+    case ProfileScopeId::PlotLayout:
+        return "PlotLayout";
+    case ProfileScopeId::FrontageWallCarve:
+        return "FrontageWallCarve";
+    case ProfileScopeId::MeshOutline:
+        return "MeshOutline";
+    case ProfileScopeId::MeshFrontageSeg:
+        return "MeshFrontageSeg";
+    case ProfileScopeId::MeshAlleyProbe:
+        return "MeshAlleyProbe";
+    case ProfileScopeId::MeshRoad:
+        return "MeshRoad";
+    case ProfileScopeId::MeshHopDebug:
+        return "MeshHopDebug";
+    case ProfileScopeId::MeshJunction:
+        return "MeshJunction";
     default:
         return "Unknown";
     }

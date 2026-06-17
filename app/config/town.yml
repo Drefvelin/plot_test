@@ -15,8 +15,8 @@ alley_side_road_sample_count: 5      # interior samples along alley for side-roa
 alley_fill_fail_limit: 5             # consecutive failed fill attempts before alley is abandoned
 
 buildings:
-  house: 85
-  church: 2
-  workshop: 60
+  house: 585
+  church: 5
+  workshop: 360
   resource: 15
   farm: 25

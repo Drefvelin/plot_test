@@ -2,6 +2,7 @@
 
 #include "DefCache.h"
 #include "PlacementLogging.h"
+#include "TerrainAtlas.h"
 #include "Town.h"
 #include "TownConfig.h"
 
@@ -16,5 +17,10 @@ void enqueuePendingAlleyFill(Town& town, int addedAtQueueIndex, int hostRoadId);
 
 bool tryAddSecondaryRoad(Town& town, int queueIndex, float setback, const TownConfig& townCfg,
                          const DefCache& defs, PlacementSearchLog& searchLog, int& outRoadId,
-                         int forceRoadId, const std::vector<int>& junctionHops, int townSeed);
+                         int forceRoadId, const std::vector<int>& junctionHops, int townSeed,
+                         const TerrainAtlas* terrain = nullptr);
+bool removeSecondaryRecordsBlockedByMainFootprint(Town& town, const BuildingFootprint& footprint,
+                                                  int hostRoadId,
+                                                  const TerrainAtlas* terrain = nullptr);
+// Debug/recovery: full town reconcile (not called from normal sync).
 bool removeAlleysThroughSecondaryBuildings(Town& town);

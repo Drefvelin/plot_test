@@ -1,13 +1,18 @@
 #include "Town.h"
 
+#include "Profile.h"
+#include "PlacementFloors.h"
+#include "PlacementFrontier.h"
 #include "RoadExhaustion.h"
 #include "PlotGeometry.h"
 #include "FrontageZones.h"
 #include "TerrainAtlas.h"
+#include "TownConfig.h"
 #include "Units.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace {
 
@@ -57,19 +62,20 @@ void recomputeSegmentDist(RoadFrontageSegment& segment, const Vec2& origin, cons
     segment.centerDist = segmentCenterDist(origin, edgeDir, segment.startT, segment.endT, center);
 }
 
-void carveSideFrontage(RoadSideFrontage& side, const Vec2& origin, const Vec2& edgeDir,
-                       float usedStart, float usedEnd, const Vec2& center, int& nextSegmentId) {
+void carveSegmentSpan(std::vector<RoadFrontageSegment>& segments, const Vec2& origin,
+                      const Vec2& edgeDir, float usedStart, float usedEnd, const Vec2& center,
+                      int& nextSegmentId) {
     constexpr float kEps = 0.08f;
     std::vector<RoadFrontageSegment> remaining;
-    remaining.reserve(side.segments.size() + 1);
+    remaining.reserve(segments.size() + 1);
 
-    for (const RoadFrontageSegment& segment : side.segments) {
+    for (const RoadFrontageSegment& segment : segments) {
         if (usedEnd <= segment.startT + kEps || usedStart >= segment.endT - kEps) {
             remaining.push_back(segment);
             continue;
         }
         if (usedStart > segment.startT + kEps) {
-            RoadFrontageSegment left{nextSegmentId++, segment.startT, usedStart, 0.f};
+            RoadFrontageSegment left{segment.id, segment.startT, usedStart, 0.f};
             recomputeSegmentDist(left, origin, edgeDir, center);
             if (left.width() > kEps) {
                 remaining.push_back(left);
@@ -84,7 +90,30 @@ void carveSideFrontage(RoadSideFrontage& side, const Vec2& origin, const Vec2& e
         }
     }
 
-    side.segments = std::move(remaining);
+    segments = std::move(remaining);
+}
+
+void carveSideFrontage(RoadSideFrontage& side, const Vec2& origin, const Vec2& edgeDir,
+                       float usedStart, float usedEnd, const Vec2& center, int& nextSegmentId) {
+    carveSegmentSpan(side.segments, origin, edgeDir, usedStart, usedEnd, center, nextSegmentId);
+}
+
+void carveSideWall(RoadSideFrontage& side, const Vec2& origin, const Vec2& edgeDir, float usedStart,
+                   float usedEnd, const Vec2& center, int& nextSegmentId) {
+    carveSegmentSpan(side.wallSegments, origin, edgeDir, usedStart, usedEnd, center, nextSegmentId);
+}
+
+void initWallSegmentOnSide(RoadSideFrontage& side, const Vec2& origin, const Vec2& edgeDir,
+                           float setback, float roadLen, const Vec2& center, int& nextWallId) {
+    if (side.inward.length() < 1e-4f || roadLen < setback * 2.f + 0.5f) {
+        return;
+    }
+    RoadFrontageSegment segment;
+    segment.id         = nextWallId++;
+    segment.startT     = setback;
+    segment.endT       = roadLen - setback;
+    segment.centerDist = segmentCenterDist(origin, edgeDir, segment.startT, segment.endT, center);
+    side.wallSegments.push_back(segment);
 }
 
 }  // namespace
@@ -239,14 +268,16 @@ void buildJunctionMesh(Town& town, float pixelsPerUnit, float radiusUnits) {
 void assignRoadSideInwards(Town& town, const TerrainAtlas* terrain) {
     constexpr float kBankProbeDist = 2.f;
     for (Road& road : town.roads) {
-        road.sideA = RoadSideFrontage{};
-        road.sideB = RoadSideFrontage{};
         if (road.isBridge) {
+            road.sideA.inward = Vec2{};
+            road.sideB.inward = Vec2{};
             continue;
         }
 
         const Vec2 dir = (road.b - road.a).normalized();
         if (dir.length() < 1e-4f) {
+            road.sideA.inward = Vec2{};
+            road.sideB.inward = Vec2{};
             continue;
         }
         const Vec2 left = perpendicular(dir).normalized();
@@ -294,8 +325,10 @@ void buildSecondaryRoadFrontageSegments(Road& road, Town& town, float setback) {
     }
 }
 
-void resetRoadFrontageSegments(Town& town, float frontageSetback) {
-    town.frontageSegmentIdCounter = 0;
+void resetRoadFrontageSegments(Town& town, float frontageSetback, bool resetSegmentIds) {
+    if (resetSegmentIds) {
+        town.frontageSegmentIdCounter = 0;
+    }
 
     for (Road& road : town.roads) {
         road.sideA.segments.clear();
@@ -333,6 +366,56 @@ void resetRoadFrontageSegments(Town& town, float frontageSetback) {
     }
 }
 
+void buildSecondaryWallSegments(Road& road, Town& town, float setback) {
+    const float len = road.length();
+    if (len < setback * 2.f + 0.5f) {
+        return;
+    }
+
+    for (int bank = 0; bank < 2; ++bank) {
+        RoadSideFrontage* side = road.sideBank(bank);
+        Vec2              origin{};
+        Vec2              farEnd{};
+        Vec2              edgeDir{};
+        if (!roadFrameForBank(road, bank, origin, farEnd, edgeDir)) {
+            continue;
+        }
+        initWallSegmentOnSide(*side, origin, edgeDir, setback, len, town.center,
+                              town.wallSegmentIdCounter);
+    }
+}
+
+void resetWallSegments(Town& town, float frontageSetback, bool resetSegmentIds) {
+    if (resetSegmentIds) {
+        town.wallSegmentIdCounter = 0;
+    }
+
+    for (Road& road : town.roads) {
+        road.sideA.wallSegments.clear();
+        road.sideB.wallSegments.clear();
+        if (road.isBridge) {
+            continue;
+        }
+
+        const float len = road.length();
+        if (len < frontageSetback * 2.f + 0.5f) {
+            continue;
+        }
+
+        for (int bank = 0; bank < 2; ++bank) {
+            RoadSideFrontage* side = road.sideBank(bank);
+            Vec2              origin{};
+            Vec2              farEnd{};
+            Vec2              edgeDir{};
+            if (!roadFrameForBank(road, bank, origin, farEnd, edgeDir)) {
+                continue;
+            }
+            initWallSegmentOnSide(*side, origin, edgeDir, frontageSetback, len, town.center,
+                                  town.wallSegmentIdCounter);
+        }
+    }
+}
+
 void trimSecondaryRoadRecords(Town& town, int targetCount) {
     town.secondaryRoadRecords.erase(
         std::remove_if(town.secondaryRoadRecords.begin(), town.secondaryRoadRecords.end(),
@@ -346,6 +429,46 @@ namespace {
 
 constexpr float kRoadSplitEndpointEps = 0.08f;
 constexpr float kRoadSplitOnSegmentEps = 0.05f;
+
+void splitSideWallAtT(RoadSideFrontage& headSide, RoadSideFrontage& tailSide, float splitT,
+                      const Vec2& headOrigin, const Vec2& headEdgeDir, const Vec2& tailOrigin,
+                      const Vec2& tailEdgeDir, const Vec2& center, int& nextSegmentId) {
+    constexpr float kEps = 0.08f;
+    std::vector<RoadFrontageSegment> headRemaining;
+    std::vector<RoadFrontageSegment> tailRemaining;
+    headRemaining.reserve(headSide.wallSegments.size());
+    tailRemaining.reserve(headSide.wallSegments.size());
+
+    for (const RoadFrontageSegment& segment : headSide.wallSegments) {
+        if (segment.endT <= splitT + kEps) {
+            headRemaining.push_back(segment);
+            continue;
+        }
+        if (segment.startT >= splitT - kEps) {
+            RoadFrontageSegment tailSeg = segment;
+            tailSeg.startT -= splitT;
+            tailSeg.endT -= splitT;
+            recomputeSegmentDist(tailSeg, tailOrigin, tailEdgeDir, center);
+            if (tailSeg.width() > kEps) {
+                tailRemaining.push_back(tailSeg);
+            }
+            continue;
+        }
+        RoadFrontageSegment headSeg{segment.id, segment.startT, splitT, 0.f};
+        recomputeSegmentDist(headSeg, headOrigin, headEdgeDir, center);
+        if (headSeg.width() > kEps) {
+            headRemaining.push_back(headSeg);
+        }
+        RoadFrontageSegment tailSeg{nextSegmentId++, 0.f, segment.endT - splitT, 0.f};
+        recomputeSegmentDist(tailSeg, tailOrigin, tailEdgeDir, center);
+        if (tailSeg.width() > kEps) {
+            tailRemaining.push_back(tailSeg);
+        }
+    }
+
+    headSide.wallSegments = std::move(headRemaining);
+    tailSide.wallSegments = std::move(tailRemaining);
+}
 
 void splitSideFrontageAtT(RoadSideFrontage& headSide, RoadSideFrontage& tailSide, float splitT,
                             const Vec2& headOrigin, const Vec2& headEdgeDir,
@@ -429,6 +552,8 @@ void splitRoadAtPoint(Town& town, int roadId, const Vec2& point) {
             RoadSideFrontage tailSide{};
             splitSideFrontageAtT(*headSide, tailSide, splitT, headOrigin, headEdgeDir, tailOrigin,
                                  tailEdgeDir, town.center, town.frontageSegmentIdCounter);
+            splitSideWallAtT(*headSide, tailSide, splitT, headOrigin, headEdgeDir, tailOrigin,
+                             tailEdgeDir, town.center, town.wallSegmentIdCounter);
             *tail.sideBank(bank) = std::move(tailSide);
         }
     }
@@ -484,7 +609,75 @@ void splitRoadsAtAlleyEndpoints(Town& town) {
     }
 }
 
+void applySecondaryRoadRecordImpl(Town& town, const SecondaryRoadRecord& rec,
+                                  const TerrainAtlas* terrain) {
+    constexpr float kSetback = 2.f;
+
+    if (rec.hostRoadId >= 0 && rec.hostRoadId < static_cast<int>(town.roads.size())) {
+        const Road& host = town.roads[static_cast<std::size_t>(rec.hostRoadId)];
+        if (!host.isSecondary && (rec.a - host.a).length() > kRoadSplitEndpointEps
+            && (rec.a - host.b).length() > kRoadSplitEndpointEps
+            && distancePointToSegment(rec.a, host.a, host.b) <= kRoadSplitOnSegmentEps) {
+            splitRoadAtPoint(town, rec.hostRoadId, rec.a);
+        }
+    }
+
+    Road alley;
+    alley.id                 = static_cast<int>(town.roads.size());
+    alley.a                  = rec.a;
+    alley.b                  = rec.b;
+    alley.hostRoadId         = rec.hostRoadId;
+    alley.hostBankIndex      = rec.hostBankIndex;
+    alley.isSecondary        = true;
+    alley.addedAtQueueIndex  = rec.addedAtQueueIndex;
+    town.roads.push_back(alley);
+    const int alleyRoadId = alley.id;
+
+    assignRoadSideInwards(town, terrain);
+    buildSecondaryRoadFrontageSegments(town.roads[static_cast<std::size_t>(alleyRoadId)], town,
+                                     kSetback);
+    buildSecondaryWallSegments(town.roads[static_cast<std::size_t>(alleyRoadId)], town, kSetback);
+
+    splitRoadsAtAlleyEndpoints(town);
+    indexJunctions(town);
+    invalidateRoadTopologyCaches(town);
+
+    frontierRefreshRoad(town, rec.hostRoadId);
+    frontierRefreshRoad(town, alleyRoadId);
+    const int destTarget = findRoadInteriorSplitTarget(town, rec.b, alleyRoadId);
+    if (destTarget >= 0) {
+        frontierRefreshRoad(town, destTarget);
+    }
+
+    town.cachedSecondaryRecordsFingerprint = secondaryRoadRecordsFingerprint(town);
+    rebuildSecondaryRoadIdList(town);
+}
+
 }  // namespace
+
+std::uint64_t secondaryRoadRecordsFingerprint(const Town& town) {
+    const auto floatBits = [](float value) -> std::uint64_t {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+    };
+
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const SecondaryRoadRecord& rec : town.secondaryRoadRecords) {
+        const auto mix = [&hash](std::uint64_t value) {
+            hash ^= value;
+            hash *= 1099511628211ULL;
+        };
+        mix(static_cast<std::uint64_t>(rec.hostRoadId));
+        mix(static_cast<std::uint64_t>(rec.hostBankIndex));
+        mix(static_cast<std::uint64_t>(rec.addedAtQueueIndex));
+        mix(floatBits(rec.a.x));
+        mix(floatBits(rec.a.y));
+        mix(floatBits(rec.b.x));
+        mix(floatBits(rec.b.y));
+    }
+    return hash;
+}
 
 void rebuildSecondaryRoadsFromRecords(Town& town, const TerrainAtlas* terrain) {
     town.roads.erase(std::remove_if(town.roads.begin(), town.roads.end(),
@@ -512,11 +705,15 @@ void rebuildSecondaryRoadsFromRecords(Town& town, const TerrainAtlas* terrain) {
     for (Road& road : town.roads) {
         if (road.isSecondary) {
             buildSecondaryRoadFrontageSegments(road, town, 2.f);
+            buildSecondaryWallSegments(road, town, 2.f);
         }
     }
     splitRoadsAtAlleyEndpoints(town);
     indexJunctions(town);
     invalidateRoadTopologyCaches(town);
+    town.cachedSecondaryRecordsFingerprint = secondaryRoadRecordsFingerprint(town);
+    rebuildSecondaryRoadIdList(town);
+    rebuildPlacementFrontier(town);
 }
 
 void removeSecondaryRoadAtQueueIndex(Town& town, int queueIndex) {
@@ -529,6 +726,206 @@ void removeSecondaryRoadAtQueueIndex(Town& town, int queueIndex) {
     rebuildSecondaryRoadsFromRecords(town);
 }
 
+void ensurePlacementSyncMins(Town& town, const PlacementFloors& floors, const TownConfig& townCfg,
+                             float frontageSetback) {
+    town.syncMinPlotFrontage  = floors.minPlotFrontage;
+    town.syncMinGapWidth      = floors.minGapWidth;
+    town.syncMinAlleyGapWidth = townCfg.minWallGapForAlley;
+    town.syncFrontageSetback  = frontageSetback;
+}
+
+void ensureTownFrontageInitialized(Town& town, float setback, const PlacementFloors& floors,
+                                   const TownConfig& townCfg) {
+    if (town.frontageInitialized) {
+        return;
+    }
+    ensurePlacementSyncMins(town, floors, townCfg, setback);
+    resetRoadFrontageSegments(town, setback, true);
+    resetWallSegments(town, setback, true);
+    clearAllRoadExhaustion(town);
+    recomputePlotGapDoneTown(town);
+    rebuildPlacementFrontier(town);
+    rebuildAllMainOccupancyT(town);
+    rebuildSecondaryRoadIdList(town);
+    town.frontageInitialized              = true;
+    town.cachedSecondaryRecordsFingerprint = secondaryRoadRecordsFingerprint(town);
+}
+
+namespace {
+
+void initBankPlotSegment(Road& road, int bankIndex, float setback, Town& town) {
+    RoadSideFrontage* side = road.sideBank(bankIndex);
+    if (side == nullptr || side->inward.length() < 1e-4f || road.isBridge) {
+        return;
+    }
+    const float len = road.length();
+    if (len < setback * 2.f + 0.5f) {
+        side->segments.clear();
+        return;
+    }
+    Vec2 origin{};
+    Vec2 farEnd{};
+    Vec2 edgeDir{};
+    if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
+        return;
+    }
+    side->segments.clear();
+    RoadFrontageSegment segment;
+    segment.id     = town.frontageSegmentIdCounter++;
+    segment.startT = setback;
+    segment.endT   = len - setback;
+    segment.centerDist =
+        (origin + edgeDir * ((segment.startT + segment.endT) * 0.5f) - town.center).length();
+    side->segments.push_back(segment);
+}
+
+void initBankWallSegment(Road& road, int bankIndex, float setback, Town& town) {
+    RoadSideFrontage* side = road.sideBank(bankIndex);
+    if (side == nullptr || side->inward.length() < 1e-4f || road.isBridge) {
+        return;
+    }
+    const float len = road.length();
+    side->wallSegments.clear();
+    if (len < setback * 2.f + 0.5f) {
+        return;
+    }
+    Vec2 origin{};
+    Vec2 farEnd{};
+    Vec2 edgeDir{};
+    if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
+        return;
+    }
+    RoadFrontageSegment segment;
+    segment.id         = town.wallSegmentIdCounter++;
+    segment.startT     = setback;
+    segment.endT       = len - setback;
+    segment.centerDist =
+        (origin + edgeDir * ((segment.startT + segment.endT) * 0.5f) - town.center).length();
+    side->wallSegments.push_back(segment);
+}
+
+bool instanceUsesRoadBank(const BuildingInstance& inst, int roadId, int bankIndex) {
+    if (inst.placementMode == BuildingPlacementMode::SegmentGapFill) {
+        return inst.roadId == roadId && inst.roadBank == bankIndex;
+    }
+    if (inst.placementMode == BuildingPlacementMode::PlotLot) {
+        return inst.plot.roadId == roadId && inst.plot.roadBank == bankIndex;
+    }
+    return false;
+}
+
+}  // namespace
+
+void restoreBankFrontageFromInstances(Town& town, int roadId, int bankIndex, float frontageSetback) {
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return;
+    }
+    Road& road = town.roads[static_cast<std::size_t>(roadId)];
+    initBankPlotSegment(road, bankIndex, frontageSetback, town);
+    initBankWallSegment(road, bankIndex, frontageSetback, town);
+    clearAlleyGapStateForRoad(town, roadId);
+
+    for (const BuildingInstance& inst : town.buildingInstances) {
+        if (!instanceUsesRoadBank(inst, roadId, bankIndex)) {
+            continue;
+        }
+        if (inst.placementMode == BuildingPlacementMode::SegmentGapFill) {
+            if (!inst.footprints.empty()) {
+                carveRoadFrontageForFootprint(town, inst.roadId, inst.roadBank, inst.footprints[0]);
+                carveRoadWallForFootprint(town, inst.roadId, inst.roadBank, inst.footprints[0]);
+            }
+        } else {
+            carveRoadFrontageForPlot(town, inst.plot, frontageSetback);
+            for (const BuildingFootprint& footprint : inst.footprints) {
+                if (footprint.mainBuilding) {
+                    carveRoadWallForFootprint(town, inst.plot.roadId, inst.plot.roadBank, footprint);
+                }
+            }
+        }
+    }
+
+    refreshBankExhaustionAfterCarve(town, roadId, bankIndex);
+    rebuildMainOccupancyForBank(town, roadId, bankIndex);
+    frontierRefreshPlotBank(town, roadId, bankIndex);
+    frontierRefreshWallBank(town, roadId, bankIndex);
+    frontierRefreshAlleyBank(town, roadId, bankIndex, town.syncMinAlleyGapWidth);
+}
+
+void restoreRoadFrontageFromInstances(Town& town, int roadId, float frontageSetback) {
+    for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
+        restoreBankFrontageFromInstances(town, roadId, bankIndex, frontageSetback);
+    }
+}
+
+void restoreBankWallFromInstances(Town& town, int roadId, int bankIndex, float frontageSetback) {
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return;
+    }
+    Road& road = town.roads[static_cast<std::size_t>(roadId)];
+    initBankWallSegment(road, bankIndex, frontageSetback, town);
+
+    for (const BuildingInstance& inst : town.buildingInstances) {
+        if (!instanceUsesRoadBank(inst, roadId, bankIndex)) {
+            continue;
+        }
+        if (inst.placementMode == BuildingPlacementMode::SegmentGapFill) {
+            if (!inst.footprints.empty()) {
+                carveRoadWallForFootprint(town, inst.roadId, inst.roadBank, inst.footprints[0]);
+            }
+        } else {
+            for (const BuildingFootprint& footprint : inst.footprints) {
+                if (footprint.mainBuilding) {
+                    carveRoadWallForFootprint(town, inst.plot.roadId, inst.plot.roadBank, footprint);
+                }
+            }
+        }
+    }
+}
+
+void restoreRoadWallFromInstances(Town& town, int roadId, float frontageSetback) {
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return;
+    }
+    clearAlleyGapStateForRoad(town, roadId);
+    for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
+        restoreBankWallFromInstances(town, roadId, bankIndex, frontageSetback);
+        refreshBankExhaustionAfterCarve(town, roadId, bankIndex);
+        rebuildMainOccupancyForBank(town, roadId, bankIndex);
+        frontierRefreshWallBank(town, roadId, bankIndex);
+        frontierRefreshAlleyBank(town, roadId, bankIndex, town.syncMinAlleyGapWidth);
+    }
+}
+
+void removeBuildingInstance(Town& town, int instanceId, float frontageSetback) {
+    const auto it =
+        std::find_if(town.buildingInstances.begin(), town.buildingInstances.end(),
+                     [instanceId](const BuildingInstance& inst) { return inst.id == instanceId; });
+    if (it == town.buildingInstances.end()) {
+        return;
+    }
+
+    int roadId  = -1;
+    int bankIdx = 0;
+    if (it->placementMode == BuildingPlacementMode::SegmentGapFill) {
+        roadId  = it->roadId;
+        bankIdx = it->roadBank;
+    } else if (it->placementMode == BuildingPlacementMode::PlotLot) {
+        roadId  = it->plot.roadId;
+        bankIdx = it->plot.roadBank;
+    }
+
+    town.buildingInstances.erase(it);
+
+    if (roadId >= 0) {
+        restoreBankFrontageFromInstances(town, roadId, bankIdx, frontageSetback);
+    }
+}
+
+void applySecondaryRoadRecord(Town& town, const SecondaryRoadRecord& rec,
+                              const TerrainAtlas* terrain) {
+    applySecondaryRoadRecordImpl(town, rec, terrain);
+}
+
 void buildRoadEndProbeMesh(Town& town, float /*pixelsPerUnit*/, float /*probeLengthUnits*/) {
     town.roadEndProbeMesh.setPrimitiveType(sf::Triangles);
     town.roadEndProbeMesh.clear();
@@ -536,6 +933,7 @@ void buildRoadEndProbeMesh(Town& town, float /*pixelsPerUnit*/, float /*probeLen
 }
 
 void carveRoadFrontageForPlot(Town& town, const Plot& plot, float /*frontageSetback*/) {
+    PROFILE_SCOPE(ProfileScopeId::FrontageCarve);
     if (plot.roadId < 0 || plot.roadId >= static_cast<int>(town.roads.size())) {
         return;
     }
@@ -554,11 +952,13 @@ void carveRoadFrontageForPlot(Town& town, const Plot& plot, float /*frontageSetb
                       town.frontageSegmentIdCounter);
     clearAlleyGapStateForRoad(town, plot.roadId);
     refreshBankExhaustionAfterCarve(town, plot.roadId, plot.roadBank);
-    invalidateWallSpanCacheForBank(town, plot.roadId, plot.roadBank);
+    frontierRefreshPlotBank(town, plot.roadId, plot.roadBank);
+    rebuildMainOccupancyForBank(town, plot.roadId, plot.roadBank);
 }
 
 void carveRoadFrontageForFootprint(Town& town, int roadId, int bankIndex,
                                    const BuildingFootprint& mainFootprint) {
+    PROFILE_SCOPE(ProfileScopeId::FrontageCarve);
     if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
         return;
     }
@@ -584,7 +984,40 @@ void carveRoadFrontageForFootprint(Town& town, int roadId, int bankIndex,
                       town.frontageSegmentIdCounter);
     clearAlleyGapStateForRoad(town, roadId);
     refreshBankExhaustionAfterCarve(town, roadId, bankIndex);
-    invalidateWallSpanCacheForBank(town, roadId, bankIndex);
+    frontierRefreshPlotBank(town, roadId, bankIndex);
+    rebuildMainOccupancyForBank(town, roadId, bankIndex);
+}
+
+void carveRoadWallForFootprint(Town& town, int roadId, int bankIndex,
+                               const BuildingFootprint& mainFootprint) {
+    PROFILE_SCOPE(ProfileScopeId::FrontageWallCarve);
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return;
+    }
+    Road&             road = town.roads[static_cast<std::size_t>(roadId)];
+    RoadSideFrontage* side = road.sideBank(bankIndex);
+
+    Vec2 origin{};
+    Vec2 farEnd{};
+    Vec2 edgeDir{};
+    if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
+        return;
+    }
+
+    float usedStart = 1e9f;
+    float usedEnd   = -1e9f;
+    for (const Vec2& corner : mainFootprint.corners) {
+        const float t = (corner - origin).dot(edgeDir);
+        usedStart     = std::min(usedStart, t);
+        usedEnd       = std::max(usedEnd, t);
+    }
+
+    carveSideWall(*side, origin, edgeDir, usedStart, usedEnd, town.center,
+                  town.wallSegmentIdCounter);
+    clearAlleyGapStateForRoad(town, roadId);
+    refreshBankExhaustionAfterCarve(town, roadId, bankIndex);
+    frontierRefreshWallBank(town, roadId, bankIndex);
+    frontierRefreshAlleyBank(town, roadId, bankIndex, town.syncMinAlleyGapWidth);
 }
 
 void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,
@@ -598,9 +1031,14 @@ void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,
 
     town.roadMesh.setPrimitiveType(sf::Triangles);
     town.roadMesh.clear();
+    town.roadLabels.clear();
 
     const bool clip = terrain != nullptr && terrain->valid && clipRoadsAtWater;
     for (const Road& road : town.roads) {
+        const Vec2 mid = (road.a + road.b) * 0.5f;
+        town.roadLabels.push_back(
+            {road.id, mid.x * pixelsPerUnit, mid.y * pixelsPerUnit});
+
         const sf::Color& color =
             road.isBridge ? bridgeSf : (road.isSecondary ? secondarySf : primarySf);
 

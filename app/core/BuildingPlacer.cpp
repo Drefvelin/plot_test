@@ -8,6 +8,7 @@
 #include "GrowthRings.h"
 #include "Logger.h"
 #include "PlacementLogging.h"
+#include "PlacementFrontier.h"
 #include "PlotGeometry.h"
 #include "PlacementPrep.h"
 #include "Profile.h"
@@ -21,6 +22,9 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -169,23 +173,57 @@ void rebuildFrontageSegmentMesh(Town& town, const PlotConfig& plots, float pixel
     const float     thicknessPx     = units::toPixels(kLineUnits, pixelsPerUnit);
     const float     arrowShaftPx    = units::toPixels(0.9f, pixelsPerUnit);
     const float     arrowHeadPx     = units::toPixels(kArrowHeadUnits, pixelsPerUnit);
-    const sf::Color segmentColor(0, 160, 0);
-    const sf::Color arrowColor(0, 160, 0);
-    const float     minGapWidth     = std::max(0.5f, plots.frontageSetback * 2.f);
+    const sf::Color plotColor(0, 160, 0);
+    const sf::Color wallColor(220, 200, 0);
+    const sf::Color alleyColor(255, 140, 0);
+    const float     minPlotWidth    = town.syncMinPlotFrontage > 0.f
+                                          ? town.syncMinPlotFrontage
+                                          : std::max(0.5f, plots.frontageSetback);
+    const float     minWallWidth    = town.syncMinGapWidth > 0.f
+                                          ? town.syncMinGapWidth
+                                          : std::max(0.5f, plots.frontageSetback * 2.f);
 
-    std::vector<WallGap> wallGaps;
-    collectAllPrimaryWallGaps(town, minGapWidth, wallGaps);
+    struct SegmentKey {
+        int roadId    = -1;
+        int bankIndex = 0;
+        int segmentId = -1;
 
-    for (const WallGap& gap : wallGaps) {
-        if (gap.inward.length() < 1e-4f) {
-            continue;
+        bool operator==(const SegmentKey& other) const {
+            return roadId == other.roadId && bankIndex == other.bankIndex
+                   && segmentId == other.segmentId;
         }
+    };
 
-        const Vec2& inward = gap.inward;
-        const Vec2 roadStart = gap.origin + gap.edgeDir * gap.tMin;
-        const Vec2 roadEnd   = gap.origin + gap.edgeDir * gap.tMax;
-        const float midT     = gap.gapMidT();
-        const Vec2  roadMid  = gap.origin + gap.edgeDir * midT;
+    struct SegmentKeyHash {
+        std::size_t operator()(const SegmentKey& key) const {
+            return static_cast<std::size_t>(key.roadId * 73856093 ^ key.bankIndex * 19349663
+                                            ^ key.segmentId);
+        }
+    };
+
+    std::unordered_set<SegmentKey, SegmentKeyHash> alleyFrontierSegments;
+    for (const AlleyFrontierRef& ref : town.frontiers.alley) {
+        alleyFrontierSegments.insert({ref.roadId, ref.bankIndex, ref.segmentId});
+    }
+
+    const auto appendOverlay = [&](const Road& road, int bankIndex,
+                                   const RoadFrontageSegment& segment, const sf::Color& color) {
+        const RoadSideFrontage* side = road.sideBank(bankIndex);
+        if (side == nullptr || side->inward.length() < 1e-4f) {
+            return;
+        }
+        Vec2 origin{};
+        Vec2 farEnd{};
+        Vec2 edgeDir{};
+        if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
+            return;
+        }
+        const Vec2& inward = side->inward;
+
+        const Vec2 roadStart = origin + edgeDir * segment.startT;
+        const Vec2 roadEnd   = origin + edgeDir * segment.endT;
+        const float midT     = (segment.startT + segment.endT) * 0.5f;
+        const Vec2  roadMid  = origin + edgeDir * midT;
 
         const Vec2 start    = roadStart + inward * plots.frontageSetback;
         const Vec2 end      = roadEnd + inward * plots.frontageSetback;
@@ -195,7 +233,7 @@ void rebuildFrontageSegmentMesh(Town& town, const PlotConfig& plots, float pixel
         const Vec2 endPx{units::toPixels(end.x, pixelsPerUnit),
                          units::toPixels(end.y, pixelsPerUnit)};
         const Vec2 labelMidPx{units::toPixels(labelMid.x, pixelsPerUnit),
-                                units::toPixels(labelMid.y, pixelsPerUnit)};
+                              units::toPixels(labelMid.y, pixelsPerUnit)};
         const Vec2 arrowTailPx{units::toPixels(roadMid.x, pixelsPerUnit),
                                units::toPixels(roadMid.y, pixelsPerUnit)};
         const Vec2 arrowHeadPosPx{
@@ -203,10 +241,39 @@ void rebuildFrontageSegmentMesh(Town& town, const PlotConfig& plots, float pixel
             units::toPixels((roadMid + inward * kArrowLenUnits).y, pixelsPerUnit)};
 
         appendDottedLine(town.frontageSegmentMesh, startPx, endPx, dashPx, gapPx, thicknessPx,
-                         segmentColor);
+                         color);
         appendArrow(town.frontageInwardArrowMesh, arrowTailPx, arrowHeadPosPx, arrowShaftPx,
-                    arrowHeadPx, arrowColor);
-        town.frontageSegmentLabels.push_back({gap.id, labelMidPx.x, labelMidPx.y});
+                    arrowHeadPx, color);
+        town.frontageSegmentLabels.push_back({segment.id, labelMidPx.x, labelMidPx.y});
+    };
+
+    for (const Road& road : town.roads) {
+        if (road.isBridge) {
+            continue;
+        }
+        for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
+            const RoadSideFrontage* side = road.sideBank(bankIndex);
+            if (side == nullptr || side->inward.length() < 1e-4f) {
+                continue;
+            }
+
+            for (const RoadFrontageSegment& segment : side->segments) {
+                if (segment.width() + 1e-3f < minPlotWidth) {
+                    continue;
+                }
+                appendOverlay(road, bankIndex, segment, plotColor);
+            }
+
+            for (const RoadFrontageSegment& segment : side->wallSegments) {
+                if (segment.width() + 1e-3f < minWallWidth) {
+                    continue;
+                }
+                const SegmentKey key{road.id, bankIndex, segment.id};
+                const sf::Color& color =
+                    alleyFrontierSegments.count(key) != 0 ? alleyColor : wallColor;
+                appendOverlay(road, bankIndex, segment, color);
+            }
+        }
     }
 }
 
@@ -268,8 +335,9 @@ void rebuildOutlineMesh(Town& town, const DefCache& defs, float pixelsPerUnit, i
                 fpMid = fpMid + corner;
             }
             fpMid = fpMid * 0.25f;
-            const int labelId =
-                footprint.labelId >= 0 ? footprint.labelId : 0;
+            const int labelId = footprint.mainBuilding
+                                    ? instance.id
+                                    : (footprint.labelId >= 0 ? footprint.labelId : 0);
             town.buildingLabels.push_back(
                 {labelId, units::toPixels(fpMid.x, pixelsPerUnit),
                  units::toPixels(fpMid.y, pixelsPerUnit)});
@@ -319,61 +387,77 @@ void trimPlacementState(Town& town, int targetCount) {
     town.placementFailureCount = static_cast<int>(failed.size());
 }
 
+std::string formatSkipReasonCounts(const std::unordered_map<std::string, int>& counts) {
+    std::vector<std::pair<std::string, int>> entries(counts.begin(), counts.end());
+    std::sort(entries.begin(), entries.end(),
+              [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) {
+                  return a.first < b.first;
+              });
+    std::string out;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) {
+            out += ',';
+        }
+        out += entries[i].first + ':' + std::to_string(entries[i].second);
+    }
+    return out;
+}
+
 }  // namespace
 
 void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const DefCache& defs,
                           const PlotConfig& plots, const TownConfig& townCfg, const Config& config,
                           const PlacementFloors& floors, float pixelsPerUnit, int townSeed,
-                          const TerrainAtlas* terrain, int maxIndicesPerSync) {
+                          const TerrainAtlas* terrain) {
     PROFILE_SCOPE(ProfileScopeId::PlacerSync);
+    setVerbosePlacementLogs(config.growth.verbosePlacementLogs);
     const int targetCount = queue.activeCount();
 
     trimPlacementState(town, targetCount);
 
+    ensurePlacementSyncMins(town, floors, townCfg, plots.frontageSetback);
+    ensureTownFrontageInitialized(town, plots.frontageSetback, floors, townCfg);
+
     const std::size_t secondaryBefore = town.secondaryRoadRecords.size();
+    bool              secondaryTrimmed = false;
     {
         PROFILE_SCOPE(ProfileScopeId::SecondaryRebuild);
         trimSecondaryRoadRecords(town, targetCount);
-        if (town.secondaryRoadRecords.size() < secondaryBefore) {
+        secondaryTrimmed = town.secondaryRoadRecords.size() < secondaryBefore;
+        if (secondaryTrimmed) {
             town.checkedAlleyGaps.clear();
         }
-        town.alleyProbesByQueueIndex.assign(static_cast<std::size_t>(targetCount), {});
-        rebuildSecondaryRoadsFromRecords(town, terrain);
+        if (static_cast<int>(town.alleyProbesByQueueIndex.size()) < targetCount) {
+            town.alleyProbesByQueueIndex.resize(static_cast<std::size_t>(targetCount));
+            town.alleyProbesCapacity = targetCount;
+        }
+        const std::uint64_t secondaryFingerprint = secondaryRoadRecordsFingerprint(town);
+        if (secondaryTrimmed) {
+            rebuildSecondaryRoadsFromRecords(town, terrain);
+        } else if (town.cachedSecondaryRecordsFingerprint == 0
+                   && town.secondaryRoadRecords.empty()) {
+            town.cachedSecondaryRecordsFingerprint = secondaryFingerprint;
+        } else if (secondaryFingerprint != town.cachedSecondaryRecordsFingerprint) {
+            rebuildSecondaryRoadsFromRecords(town, terrain);
+        }
         syncPendingAlleyFills(town, targetCount);
     }
 
-    const auto reapplyFrontageCarves = [&]() {
-        PROFILE_SCOPE(ProfileScopeId::FrontageCarve);
-        resetRoadFrontageSegments(town, plots.frontageSetback);
-        for (const BuildingInstance& inst : town.buildingInstances) {
-            if (inst.placementMode == BuildingPlacementMode::SegmentGapFill) {
-                if (!inst.footprints.empty()) {
-                    carveRoadFrontageForFootprint(town, inst.roadId, inst.roadBank,
-                                                  inst.footprints[0]);
-                }
-            } else {
-                carveRoadFrontageForPlot(town, inst.plot, plots.frontageSetback);
-            }
-        }
-    };
-
-    reapplyFrontageCarves();
-    initRoadExhaustionForSync(town, floors, townCfg);
     logSegmentInventory(town);
-    logRingState(town);
+    if (verbosePlacementLogs()) {
+        logRingState(town);
+    }
 
     const auto& queueTypes = queue.queue();
-    int         ringBumps    = 0;
-    int         indicesProcessed = 0;
+    int         ringBumps = 0;
+    std::unordered_map<std::string, int> skipReasonCounts;
+    std::unordered_map<int, std::string> skipReasonByIndex;
 
-    while (town.placementQueueCursor < targetCount) {
+    if (town.placementQueueCursor < targetCount) {
         PROFILE_SCOPE(ProfileScopeId::GrowthLoop);
         const std::vector<int>& junctionHops = getJunctionHops(town);
         const int index = town.placementQueueCursor;
-        if (index >= static_cast<int>(queueTypes.size())) {
-            break;
-        }
-
+        if (index < static_cast<int>(queueTypes.size())) {
         BuildingInstance instance;
         instance.id           = index;
         instance.buildingType = queueTypes[static_cast<std::size_t>(index)];
@@ -388,9 +472,12 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
 
         RoadAttemptMemo roadMemo;
         roadMemo.syncContext(town);
-        const PlacementPrep prep =
-            buildPlacementPrep(town, defs, instance.buildingType, index, townSeed,
-                               queue.maxBuildings());
+        PlacementPrep prep{};
+        {
+            PROFILE_SCOPE(ProfileScopeId::PlacementPrep);
+            prep = buildPlacementPrep(town, defs, instance.buildingType, index, townSeed,
+                                        queue.maxBuildings());
+        }
 
         Logger::log("layout",
                     "ring_attempt: queueIndex=" + std::to_string(index) + " type="
@@ -437,9 +524,8 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
             }
 
             constexpr int kMaxBumpsPerIndex = 32;
-            const int     maxBumpsPerSync =
-                (maxIndicesPerSync > 0) ? 3 : kMaxBumpsPerIndex;
-            int bumpsThisSync = 0;
+            constexpr int kMaxBumpsPerSync  = 3;
+            int           bumpsThisSync    = 0;
 
             while (!placed) {
                 if (fillIn && !placed) {
@@ -502,7 +588,7 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
                     }
                 }
 
-                if (!placed && maxIndicesPerSync > 0 && bumpsThisSync >= maxBumpsPerSync) {
+                if (!placed && bumpsThisSync >= kMaxBumpsPerSync) {
                     deferIndex = true;
                     break;
                 }
@@ -520,55 +606,84 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
             }
         }
 
-        if (deferIndex) {
-            break;
-        }
-
-        if (!placed) {
-            logPlacementDecision(town, searchLog, plots, defs);
-            Logger::log("layout",
-                        "placement_skipped: queueIndex=" + std::to_string(index) + " type="
-                            + instance.buildingType + " reason=" + skipReason + " suburban_max="
-                            + std::to_string(town.suburbanMaxHop) + " urban_core="
-                            + std::to_string(town.urbanCoreMaxHop));
-            town.placementFailedIndices.push_back(index);
-            town.placementFailureCount = static_cast<int>(town.placementFailedIndices.size());
-        } else {
-            logPlacementDecision(town, searchLog, plots, defs);
-            town.buildingInstances.push_back(instance);
-            if (instance.placementMode == BuildingPlacementMode::SegmentGapFill) {
-                invalidateWallSpanCacheForBank(town, instance.roadId, instance.roadBank);
+        if (!deferIndex) {
+            if (!placed) {
+                logPlacementDecision(town, searchLog, plots, defs);
+                ++skipReasonCounts[skipReason];
+                skipReasonByIndex[index] = skipReason;
+                std::string skipLine =
+                    "placement_skipped: queueIndex=" + std::to_string(index) + " type="
+                    + instance.buildingType + " reason=" + skipReason + " suburban_max="
+                    + std::to_string(town.suburbanMaxHop) + " urban_core="
+                    + std::to_string(town.urbanCoreMaxHop);
+                if (!isRural && !searchLog.resultSummary.empty()) {
+                    skipLine += " " + formatPlacementSearchSummary(searchLog);
+                    const BandFilter suburbanFilter = BandFilter::suburban(town);
+                    const FrontierBandSet bands = frontierBandsFromDistFilter(
+                        town, suburbanFilter.minDistInclusive, suburbanFilter.maxDistInclusive,
+                        suburbanFilter.enabled);
+                    const PlotFrontierAudit audit = auditPlotFrontier(town, bands);
+                    skipLine += " frontier(geom=" + std::to_string(audit.geometryEligible)
+                                + " refs=" + std::to_string(audit.frontierRefs)
+                                + " unique=" + std::to_string(audit.uniqueFrontierIds)
+                                + " core=" + std::to_string(audit.coreRefs)
+                                + " suburban=" + std::to_string(audit.suburbanRefs)
+                                + " missing=" + std::to_string(audit.missingFromFrontier)
+                                + " stale=" + std::to_string(audit.staleFrontierRefs) + ")";
+                }
+                Logger::log("layout", skipLine);
+                town.placementFailedIndices.push_back(index);
+                town.placementFailureCount = static_cast<int>(town.placementFailedIndices.size());
             } else {
-                invalidateWallSpanCacheForBank(town, instance.plot.roadId, instance.plot.roadBank);
+                logPlacementDecision(town, searchLog, plots, defs);
+                town.buildingInstances.push_back(instance);
             }
-        }
 
-        ++town.placementQueueCursor;
-        ++indicesProcessed;
-        if (maxIndicesPerSync > 0 && indicesProcessed >= maxIndicesPerSync) {
-            break;
+            ++town.placementQueueCursor;
+        }
         }
     }
 
     if (town.placementQueueCursor >= targetCount) {
-        Logger::log("layout",
-                    "ring_summary: target=" + std::to_string(targetCount) + " placed="
-                        + std::to_string(town.buildingInstances.size()) + " failures="
-                        + std::to_string(town.placementFailureCount) + " bumps="
-                        + std::to_string(ringBumps) + " final_suburban_max="
-                        + std::to_string(town.suburbanMaxHop) + " final_urban_core="
-                        + std::to_string(town.urbanCoreMaxHop));
-    }
-
-    if (removeAlleysThroughSecondaryBuildings(town)) {
-        syncPendingAlleyFills(town, targetCount);
-        reapplyFrontageCarves();
+        town.placementSkipReasonsSummary = formatSkipReasonCounts(skipReasonCounts);
+        std::string summary =
+            "ring_summary: target=" + std::to_string(targetCount) + " placed="
+            + std::to_string(town.buildingInstances.size()) + " failures="
+            + std::to_string(town.placementFailureCount) + " bumps="
+            + std::to_string(ringBumps) + " final_suburban_max="
+            + std::to_string(town.suburbanMaxHop) + " final_urban_core="
+            + std::to_string(town.urbanCoreMaxHop);
+        if (!town.placementSkipReasonsSummary.empty()) {
+            summary += " skip_reasons=" + town.placementSkipReasonsSummary;
+        }
+        Logger::log("layout", summary);
+        for (int failedIndex : town.placementFailedIndices) {
+            if (failedIndex < 0 || failedIndex >= static_cast<int>(queueTypes.size())) {
+                continue;
+            }
+            const std::string failedType =
+                queueTypes[static_cast<std::size_t>(failedIndex)];
+            const auto reasonIt = skipReasonByIndex.find(failedIndex);
+            const std::string reason =
+                reasonIt != skipReasonByIndex.end() ? reasonIt->second : "unknown";
+            Logger::log("layout",
+                        "placement_failures: index=" + std::to_string(failedIndex) + " type="
+                            + failedType + " reason=" + reason);
+        }
+    } else {
+        town.placementSkipReasonsSummary.clear();
     }
 
     {
         PROFILE_SCOPE(ProfileScopeId::MeshRebuild);
-        rebuildOutlineMesh(town, defs, pixelsPerUnit, townSeed);
-        rebuildFrontageSegmentMesh(town, plots, pixelsPerUnit);
+        {
+            PROFILE_SCOPE(ProfileScopeId::MeshOutline);
+            rebuildOutlineMesh(town, defs, pixelsPerUnit, townSeed);
+        }
+        {
+            PROFILE_SCOPE(ProfileScopeId::MeshFrontageSeg);
+            rebuildFrontageSegmentMesh(town, plots, pixelsPerUnit);
+        }
         int probeDisplayIndex = -1;
         if (town.urbanCoreMaxHop >= 0 && town.placementQueueCursor > 0) {
             probeDisplayIndex = town.placementQueueCursor - 1;
@@ -576,13 +691,26 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
                 probeDisplayIndex = targetCount - 1;
             }
         }
-        rebuildAlleyProbeMesh(town, probeDisplayIndex, pixelsPerUnit);
-        rebuildRoadMesh(town, config.colors.edges, config.colors.secondaryEdges,
-                        config.colors.bridge, pixelsPerUnit, terrain, config.terrain.clipRoadsAtWater);
-        rebuildHopDebugRoadMesh(town, getJunctionHops(town), pixelsPerUnit);
-        rebuildHopDebugJunctionMesh(town, getJunctionHops(town), pixelsPerUnit, 1.f);
-        indexJunctions(town);
-        buildJunctionMesh(town, config.world.pixelsPerUnit, 1.f);
+        {
+            PROFILE_SCOPE(ProfileScopeId::MeshAlleyProbe);
+            rebuildAlleyProbeMesh(town, probeDisplayIndex, pixelsPerUnit);
+        }
+        {
+            PROFILE_SCOPE(ProfileScopeId::MeshRoad);
+            rebuildRoadMesh(town, config.colors.edges, config.colors.secondaryEdges,
+                            config.colors.bridge, pixelsPerUnit, terrain,
+                            config.terrain.clipRoadsAtWater);
+        }
+        {
+            PROFILE_SCOPE(ProfileScopeId::MeshHopDebug);
+            rebuildHopDebugRoadMesh(town, getJunctionHops(town), pixelsPerUnit);
+            rebuildHopDebugJunctionMesh(town, getJunctionHops(town), pixelsPerUnit, 1.f);
+        }
+        {
+            PROFILE_SCOPE(ProfileScopeId::MeshJunction);
+            indexJunctions(town);
+            buildJunctionMesh(town, config.world.pixelsPerUnit, 1.f);
+        }
     }
 
     int gapFillCount = 0;

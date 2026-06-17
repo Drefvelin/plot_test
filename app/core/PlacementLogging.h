@@ -73,7 +73,11 @@ RoadSearchStats& statsFor(PlacementSearchLog& log, int roadId, float centDist);
 void recordDimReject(RoadSearchStats& stats, DimReject reason);
 void logPlacementDecision(const Town& town, const PlacementSearchLog& log, const PlotConfig& plots,
                           const DefCache& defs);
+void setVerbosePlacementLogs(bool enabled);
+bool verbosePlacementLogs();
 void logSegmentInventory(const Town& town);
 void logSegmentProbe(int buildingId, const FrontageSlot& slot, const char* result,
                      DimReject reject = DimReject::None, float depthCap = -1.f,
                      float frontageNeed = -1.f, float areaFit = -1.f, float slotT = -1.f);
+
+std::string formatPlacementSearchSummary(const PlacementSearchLog& log);

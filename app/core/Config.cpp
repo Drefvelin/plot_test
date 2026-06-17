@@ -225,6 +225,9 @@ Config Config::load(const std::filesystem::path& path) {
         if (g["profile"]) {
             config.growth.profile = g["profile"].as<bool>();
         }
+        if (g["verbose_placement_logs"]) {
+            config.growth.verbosePlacementLogs = g["verbose_placement_logs"].as<bool>();
+        }
     }
 
     return config;

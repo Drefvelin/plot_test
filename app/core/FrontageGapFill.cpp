@@ -9,19 +9,21 @@
 #include "PlotDimensions.h"
 #include "PlotGeometry.h"
 #include "RoadExhaustion.h"
+#include "PlacementFrontier.h"
 #include "Profile.h"
+#include "SecondaryRoadPlacement.h"
 
 #include <algorithm>
 #include <cmath>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
 
 constexpr float kWallEps        = 0.08f;
 constexpr float kSlotDedupeEps  = 0.35f;
-constexpr int   kWallGapSegment = -1000;
 constexpr int   kMaxGapFillSlotsTried = 48;
 
 struct MainSpan {
@@ -111,28 +113,29 @@ void collectMainSpansOnSide(const Town& town, int roadId, int bankIndex,
     out.swap(merged);
 }
 
-void clipGapToMainWalls(const Town& town, int roadId, int bankIndex,
-                        const Vec2& origin, const Vec2& edgeDir, float segmentStart,
-                        float segmentEnd, float& outStart, float& outEnd) {
+void clipGapToMainWalls(Town& town, int roadId, int bankIndex, const Vec2& origin,
+                        const Vec2& edgeDir, float segmentStart, float segmentEnd, float& outStart,
+                        float& outEnd) {
     outStart = segmentStart;
     outEnd   = segmentEnd;
 
-    for (const BuildingInstance& instance : town.buildingInstances) {
-        if (!instanceOnRoadSide(instance, roadId, bankIndex)) {
-            continue;
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return;
+    }
+    Road&             road = town.roads[static_cast<std::size_t>(roadId)];
+    RoadSideFrontage* side = road.sideBank(bankIndex);
+    if (side == nullptr) {
+        return;
+    }
+    if (side->mainOccupancyT.empty()) {
+        rebuildMainOccupancyForBank(town, roadId, bankIndex);
+    }
+    for (const std::pair<float, float>& span : side->mainOccupancyT) {
+        if (span.second <= segmentStart + kWallEps) {
+            outStart = std::max(outStart, span.second);
         }
-        for (const BuildingFootprint& footprint : instance.footprints) {
-            if (!footprint.mainBuilding) {
-                continue;
-            }
-            const float tMin = footprintTMin(footprint, origin, edgeDir);
-            const float tMax = footprintTMax(footprint, origin, edgeDir);
-            if (tMax <= segmentStart + kWallEps) {
-                outStart = std::max(outStart, tMax);
-            }
-            if (tMin >= segmentEnd - kWallEps) {
-                outEnd = std::min(outEnd, tMin);
-            }
+        if (span.first >= segmentEnd - kWallEps) {
+            outEnd = std::min(outEnd, span.first);
         }
     }
 }
@@ -346,8 +349,7 @@ void collectMainWallGapSlots(Town& town, const DefCache& defs,
                              const std::string& buildingType, float minWidth, float townGrowth,
                              const BandFilter& bandFilter, std::vector<FrontageSlot>& out,
                              int roadFilter) {
-    const char* zone      = zoneTypeForBuilding(defs, buildingType);
-    int         wallGapId = kWallGapSegment;
+    const char* zone = zoneTypeForBuilding(defs, buildingType);
     for (const Road& road : town.roads) {
         if (road.isBridge) {
             continue;
@@ -366,44 +368,25 @@ void collectMainWallGapSlots(Town& town, const DefCache& defs,
                 continue;
             }
 
-            Vec2 origin{};
-            Vec2 farEnd{};
-            Vec2 edgeDir{};
-            if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
+            const RoadSideFrontage* side = road.sideBank(bankIndex);
+            if (side == nullptr || side->inward.length() < 1e-4f) {
                 continue;
             }
 
-            const float roadLen = road.length();
-            std::vector<RoadWallSpan> spans;
-            getCachedBuildingWallSpans(town, road.id, bankIndex, origin, edgeDir, roadLen, spans);
-
-            auto addGap = [&](float startT, float endT) {
-                if (endT - startT < minWidth - 1e-3f) {
-                    return;
+            for (const RoadFrontageSegment& segment : side->wallSegments) {
+                if (segment.width() + 1e-3f < minWidth) {
+                    continue;
                 }
                 FrontageSlot slot;
-                slot.segmentId  = wallGapId--;
+                slot.segmentId  = segment.id;
                 slot.roadId     = road.id;
                 slot.bankIndex  = bankIndex;
-                slot.startT     = startT;
-                slot.endT       = endT;
-                {
-                    const Vec2 mid = origin + edgeDir * ((startT + endT) * 0.5f);
-                    slot.centerDist = (mid - town.center).length();
-                }
+                slot.startT     = segment.startT;
+                slot.endT       = segment.endT;
+                slot.centerDist = segment.centerDist;
                 slot.zoneScore  = scoreSegmentForZone(town, slot, zone, townGrowth);
+                slot.isWallGap  = true;
                 appendUniqueGapSlot(out, slot);
-            };
-
-            float prevEnd = 0.f;
-            for (const RoadWallSpan& span : spans) {
-                if (span.tMin > prevEnd + minWidth - 1e-3f) {
-                    addGap(prevEnd, span.tMin);
-                }
-                prevEnd = std::max(prevEnd, span.tMax);
-            }
-            if (roadLen > prevEnd + minWidth - 1e-3f) {
-                addGap(prevEnd, roadLen);
             }
         }
     }
@@ -426,26 +409,18 @@ bool bankHasMainWallGapAtLeast(Town& town, int roadId, int bankIndex, float minW
     if (roadId < 0 || roadId >= static_cast<int>(town.roads.size()) || minWidth <= 0.f) {
         return false;
     }
-    const Road& road = town.roads[static_cast<std::size_t>(roadId)];
+    const Road&             road = town.roads[static_cast<std::size_t>(roadId)];
     const RoadSideFrontage* side = road.sideBank(bankIndex);
     if (side == nullptr || side->inward.length() < 1e-4f) {
         return false;
     }
 
-    Vec2 origin{};
-    Vec2 farEnd{};
-    Vec2 edgeDir{};
-    if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
-        return false;
+    for (const RoadFrontageSegment& segment : side->wallSegments) {
+        if (segment.width() + 1e-3f >= minWidth) {
+            return true;
+        }
     }
-
-    const float             roadLen = road.length();
-    std::vector<RoadWallSpan> spans;
-    getCachedBuildingWallSpans(town, roadId, bankIndex, origin, edgeDir, roadLen, spans);
-
-    std::vector<RoadWallSpan> gaps;
-    gapsFromOccupiedSpans(spans, roadLen, minWidth, gaps);
-    return !gaps.empty();
+    return false;
 }
 
 bool tryPlaceSegmentMain(Town& town, const std::string& buildingType, const DefCache& defs,
@@ -475,12 +450,22 @@ bool tryPlaceSegmentMain(Town& town, const std::string& buildingType, const DefC
     searchLog.zoneType     = prep.zoneType;
 
     std::vector<FrontageSlot> slots;
-    collectAllGapFillSlots(town, defs, buildingType, prep.townGrowth, minSegmentWidth, bandFilter,
-                           slots, roadFilter);
+    const bool              useWallFrontier = roadFilter < 0;
+    const FrontierBandSet   wallBands =
+        frontierBandsFromDistFilter(town, bandFilter.minDistInclusive, bandFilter.maxDistInclusive,
+                                    bandFilter.enabled);
+
+    {
+        PROFILE_SCOPE(ProfileScopeId::GapFillCollect);
+        if (!useWallFrontier) {
+            collectAllGapFillSlots(town, defs, buildingType, prep.townGrowth, minSegmentWidth,
+                                   bandFilter, slots, roadFilter);
+        }
+    }
 
     int wallGapSlots = 0;
     for (const FrontageSlot& slot : slots) {
-        if (slot.segmentId <= kWallGapSegment) {
+        if (slot.isWallGap) {
             ++wallGapSlots;
         }
     }
@@ -488,23 +473,26 @@ bool tryPlaceSegmentMain(Town& town, const std::string& buildingType, const DefC
     Logger::log("layout",
                 "gap_fill_diag: begin queueIndex=" + std::to_string(out.id) + " type="
                     + buildingType + " road_filter=" + std::to_string(roadFilter) + " slots="
-                    + std::to_string(slots.size()) + " wall_gaps=" + std::to_string(wallGapSlots)
-                    + " segments=" + std::to_string(slots.size() - wallGapSlots) + " min_width="
+                    + std::to_string(useWallFrontier ? -1 : static_cast<int>(slots.size()))
+                    + " wall_gaps=" + std::to_string(wallGapSlots) + " mode="
+                    + (useWallFrontier ? "frontier" : "collect") + " min_width="
                     + std::to_string(minSegmentWidth) + " target_area="
                     + std::to_string(prep.mainSpec.area));
 
-    std::sort(slots.begin(), slots.end(),
-              [](const FrontageSlot& lhs, const FrontageSlot& rhs) {
-                  if (std::abs(lhs.centerDist - rhs.centerDist) > 1e-3f) {
-                      return lhs.centerDist < rhs.centerDist;
-                  }
-                  const float lhsWidth = lhs.width();
-                  const float rhsWidth = rhs.width();
-                  if (std::abs(lhsWidth - rhsWidth) > 1e-3f) {
-                      return lhsWidth < rhsWidth;
-                  }
-                  return lhs.segmentId < rhs.segmentId;
-              });
+    if (!useWallFrontier) {
+        std::sort(slots.begin(), slots.end(),
+                  [](const FrontageSlot& lhs, const FrontageSlot& rhs) {
+                      if (std::abs(lhs.centerDist - rhs.centerDist) > 1e-3f) {
+                          return lhs.centerDist < rhs.centerDist;
+                      }
+                      const float lhsWidth = lhs.width();
+                      const float rhsWidth = rhs.width();
+                      if (std::abs(lhsWidth - rhsWidth) > 1e-3f) {
+                          return lhsWidth < rhsWidth;
+                      }
+                      return lhs.segmentId < rhs.segmentId;
+                  });
+    }
 
     int slotsTried = 0;
     int slotsSkippedZone = 0;
@@ -513,93 +501,123 @@ bool tryPlaceSegmentMain(Town& town, const std::string& buildingType, const DefC
     int slotsSkippedRoadFilter = 0;
     int slotsSkippedBadRoad = 0;
     std::unordered_map<std::string, int> fillFailCounts;
+    std::unordered_set<int>              skippedWallSegments;
+    std::size_t                          collectedIndex = 0;
 
-    for (const FrontageSlot& slot : slots) {
-        if (slot.width() < minSegmentWidth - 1e-3f) {
-            ++slotsSkippedNarrow;
-            continue;
-        }
-        if (slot.roadId < 0 || slot.roadId >= static_cast<int>(town.roads.size())) {
-            ++slotsSkippedBadRoad;
-            continue;
-        }
-        if (roadFilter >= 0 && slot.roadId != roadFilter) {
-            ++slotsSkippedRoadFilter;
-            continue;
-        }
-        if (slot.zoneScore > 1e8f) {
-            ++slotsSkippedZone;
-            continue;
-        }
-
-        const Road& road = town.roads[static_cast<std::size_t>(slot.roadId)];
-
-        const RoadSideFrontage* sideData = road.sideBank(slot.bankIndex);
-        if (sideData == nullptr || sideData->inward.length() < 1e-4f) {
-            ++slotsSkippedNoInward;
-            continue;
-        }
-
-        Vec2 origin{};
-        Vec2 farEnd{};
-        Vec2 edgeDir{};
-        if (!roadFrameForBank(road, slot.bankIndex, origin, farEnd, edgeDir)) {
-            ++slotsSkippedBadRoad;
-            continue;
-        }
-
-        ++slotsTried;
-        if (slotsTried > kMaxGapFillSlotsTried) {
-            break;
-        }
-
-        BuildingFootprint footprint;
-        const char*     orientUsed   = "long";
-        float           usedFrontage = 0.f;
-        const int excludeAlleyRoadId = road.isSecondary ? road.id : -1;
-        const char*     fillFailReason = "unknown";
-        if (!tryFillSegmentGap(town, slot, origin, edgeDir, sideData->inward,
-                               plots.frontageSetback, prep.mainSpec.area, *sizeBand, defs, terrain,
-                               footprint, orientUsed, usedFrontage, excludeAlleyRoadId,
-                               &fillFailReason)) {
-            ++fillFailCounts[fillFailReason != nullptr ? fillFailReason : "unknown"];
-            if (slotsTried <= 5) {
-                const char* slotKind = slot.segmentId <= kWallGapSegment ? "wall_gap" : "segment";
-                Logger::log("layout",
-                            "gap_fill_diag: slot_fail queueIndex=" + std::to_string(out.id)
-                                + " slot=" + slotKind + " road=" + std::to_string(slot.roadId)
-                                + " bank=" + std::to_string(slot.bankIndex) + " width="
-                                + std::to_string(slot.width()) + " reason=" + fillFailReason);
+    while (true) {
+        FrontageSlot slot{};
+        {
+            PROFILE_SCOPE(ProfileScopeId::GapFillTrySlot);
+            if (useWallFrontier) {
+                FrontierRef ref;
+                if (!peekClosestWallGapRef(town, wallBands, minSegmentWidth, skippedWallSegments,
+                                           ref)) {
+                    break;
+                }
+                if (!fillFrontageSlotFromRef(town, ref, true, slot)) {
+                    skippedWallSegments.insert(ref.segmentId);
+                    continue;
+                }
+                skippedWallSegments.insert(ref.segmentId);
+                if (roadFilter >= 0 && slot.roadId != roadFilter) {
+                    ++slotsSkippedRoadFilter;
+                    continue;
+                }
+            } else {
+                if (collectedIndex >= slots.size()) {
+                    break;
+                }
+                slot = slots[collectedIndex++];
             }
-            continue;
+
+            if (slot.width() < minSegmentWidth - 1e-3f) {
+                ++slotsSkippedNarrow;
+                continue;
+            }
+            if (slot.roadId < 0 || slot.roadId >= static_cast<int>(town.roads.size())) {
+                ++slotsSkippedBadRoad;
+                continue;
+            }
+            if (roadFilter >= 0 && slot.roadId != roadFilter) {
+                ++slotsSkippedRoadFilter;
+                continue;
+            }
+            if (slot.zoneScore > 1e8f) {
+                ++slotsSkippedZone;
+                continue;
+            }
+
+            const Road& road = town.roads[static_cast<std::size_t>(slot.roadId)];
+
+            const RoadSideFrontage* sideData = road.sideBank(slot.bankIndex);
+            if (sideData == nullptr || sideData->inward.length() < 1e-4f) {
+                ++slotsSkippedNoInward;
+                continue;
+            }
+
+            Vec2 origin{};
+            Vec2 farEnd{};
+            Vec2 edgeDir{};
+            if (!roadFrameForBank(road, slot.bankIndex, origin, farEnd, edgeDir)) {
+                ++slotsSkippedBadRoad;
+                continue;
+            }
+
+            ++slotsTried;
+            if (slotsTried > kMaxGapFillSlotsTried) {
+                break;
+            }
+
+            BuildingFootprint footprint;
+            const char*     orientUsed   = "long";
+            float           usedFrontage = 0.f;
+            const int excludeAlleyRoadId = road.isSecondary ? road.id : -1;
+            const char*     fillFailReason = "unknown";
+            if (!tryFillSegmentGap(town, slot, origin, edgeDir, sideData->inward,
+                                   plots.frontageSetback, prep.mainSpec.area, *sizeBand, defs,
+                                   terrain, footprint, orientUsed, usedFrontage, excludeAlleyRoadId,
+                                   &fillFailReason)) {
+                ++fillFailCounts[fillFailReason != nullptr ? fillFailReason : "unknown"];
+                if (slotsTried <= 5) {
+                    const char* slotKind = slot.isWallGap ? "wall_gap" : "segment";
+                    Logger::log("layout",
+                                "gap_fill_diag: slot_fail queueIndex=" + std::to_string(out.id)
+                                    + " slot=" + slotKind + " road=" + std::to_string(slot.roadId)
+                                    + " bank=" + std::to_string(slot.bankIndex) + " width="
+                                    + std::to_string(slot.width()) + " reason=" + fillFailReason);
+                }
+                continue;
+            }
+
+            footprint.sizeCategory = prep.mainSpec.sizeCategory;
+            footprint.mainBuilding = true;
+            footprint.labelId      = out.id;
+            copyTemplateRulesToFootprint(prep.mainSpec.rules, footprint);
+
+            removeSecondariesOverlappingMain(town, footprint, out.id);
+            removeSecondaryRecordsBlockedByMainFootprint(town, footprint, slot.roadId, terrain);
+            assignGapFillDoorEdge(footprint, slot.roadId, -1, town);
+
+            out.placementMode = BuildingPlacementMode::SegmentGapFill;
+            out.roadId        = slot.roadId;
+            out.roadBank      = slot.bankIndex;
+            out.plot          = Plot{};
+            out.footprints    = {footprint};
+
+            carveRoadFrontageForFootprint(town, slot.roadId, slot.bankIndex, footprint);
+            carveRoadWallForFootprint(town, slot.roadId, slot.bankIndex, footprint);
+
+            const char* slotKind = slot.isWallGap ? "wall_gap" : "segment";
+            Logger::log("layout",
+                        "gap_fill: queueIndex=" + std::to_string(out.id) + " type=" + buildingType
+                            + " size=" + prep.mainSpec.sizeCategory + " area="
+                            + std::to_string(footprint.placedLongLen * footprint.placedShortLen)
+                            + " road=" + std::to_string(slot.roadId) + " slot=" + slotKind
+                            + " id=" + std::to_string(slot.segmentId) + " frontage="
+                            + std::to_string(usedFrontage) + " gap=" + std::to_string(slot.width())
+                            + " orient=" + orientUsed);
+            return true;
         }
-
-        footprint.sizeCategory = prep.mainSpec.sizeCategory;
-        footprint.mainBuilding = true;
-        footprint.labelId      = 0;
-        copyTemplateRulesToFootprint(prep.mainSpec.rules, footprint);
-
-        removeSecondariesOverlappingMain(town, footprint, out.id);
-        assignGapFillDoorEdge(footprint, slot.roadId, -1, town);
-
-        out.placementMode = BuildingPlacementMode::SegmentGapFill;
-        out.roadId        = slot.roadId;
-        out.roadBank      = slot.bankIndex;
-        out.plot          = Plot{};
-        out.footprints    = {footprint};
-
-        carveRoadFrontageForFootprint(town, slot.roadId, slot.bankIndex, footprint);
-
-        const char* slotKind = slot.segmentId <= kWallGapSegment ? "wall_gap" : "segment";
-        Logger::log("layout",
-                    "gap_fill: queueIndex=" + std::to_string(out.id) + " type=" + buildingType
-                        + " size=" + prep.mainSpec.sizeCategory + " area="
-                        + std::to_string(footprint.placedLongLen * footprint.placedShortLen)
-                        + " road=" + std::to_string(slot.roadId) + " slot=" + slotKind + " id="
-                        + std::to_string(slot.segmentId) + " frontage="
-                        + std::to_string(usedFrontage) + " gap=" + std::to_string(slot.width())
-                        + " orient=" + orientUsed);
-        return true;
     }
 
     std::string failSummary;
@@ -610,7 +628,8 @@ bool tryPlaceSegmentMain(Town& town, const std::string& buildingType, const DefC
     Logger::log("layout",
                 "gap_fill_diag: fail queueIndex=" + std::to_string(out.id) + " type="
                     + buildingType + " reason=no_room slots_total="
-                    + std::to_string(slots.size()) + " tried=" + std::to_string(slotsTried)
+                    + std::to_string(useWallFrontier ? slotsTried : static_cast<int>(slots.size()))
+                    + " tried=" + std::to_string(slotsTried)
                     + " narrow=" + std::to_string(slotsSkippedNarrow) + " zone="
                     + std::to_string(slotsSkippedZone) + " no_inward="
                     + std::to_string(slotsSkippedNoInward) + " road_filter="

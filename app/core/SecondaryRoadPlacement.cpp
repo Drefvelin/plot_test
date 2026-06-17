@@ -1,6 +1,8 @@
 #include "SecondaryRoadPlacement.h"
 
 #include "FrontageZones.h"
+#include "PlacementFrontier.h"
+#include "TerrainAtlas.h"
 
 #include "Logger.h"
 #include "PlotGeometry.h"
@@ -32,6 +34,7 @@ void recordAlleyProbe(Town& town, int queueIndex, const AlleyProbeLine& line) {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kJunctionSnapEps = 0.08f;
 constexpr float kThroughRayEps   = 0.1f;
+constexpr float kWaterStopInset  = 0.15f;
 
 Vec2 rotateVec(const Vec2& v, float degrees) {
     const float rad = degrees * kPi / 180.f;
@@ -92,6 +95,9 @@ struct RayRoadHit {
     Vec2  point{};
 };
 
+bool rayToRoadHitExcluding(const Town& town, const Vec2& start, const Vec2& dir, int excludeRoadId,
+                           float maxDist, RayRoadHit& out);
+
 struct AlleyProbeViz {
     Vec2 start{};
     Vec2 end{};
@@ -126,6 +132,7 @@ struct AlleyProbeStats {
     int bankParallel      = 0;
     int depthStubFail     = 0;
     int turnFail          = 0;
+    int waterStop         = 0;
 };
 
 void appendAlleyProbeStatSummary(const AlleyProbeStats& stats, std::string& out) {
@@ -169,6 +176,94 @@ void appendAlleyProbeStatSummary(const AlleyProbeStats& stats, std::string& out)
     if (stats.turnFail > 0) {
         out += " turn_fail=" + std::to_string(stats.turnFail);
     }
+    if (stats.waterStop > 0) {
+        out += " water_stop=" + std::to_string(stats.waterStop);
+    }
+}
+
+bool clipSegmentEndAtWater(const TerrainAtlas& terrain, const Vec2& a, const Vec2& b, Vec2& outEnd,
+                           float& outLen) {
+    const Vec2  delta = b - a;
+    const float len   = delta.length();
+    if (len < 1e-4f) {
+        outEnd = b;
+        outLen = len;
+        return false;
+    }
+    if (!terrain.isBuildable(a)) {
+        outEnd = b;
+        outLen = len;
+        return false;
+    }
+
+    constexpr float kStep = 0.25f;
+    bool            prevLand = true;
+    float           prevT    = 0.f;
+    for (float dist = kStep; dist <= len + 1e-3f; dist += kStep) {
+        const float t    = std::min(dist / len, 1.f);
+        const bool  land = terrain.isBuildable(a + delta * t);
+        if (prevLand && !land) {
+            const float crossT = (prevT + t) * 0.5f;
+            outLen             = std::max(0.f, crossT * len - kWaterStopInset);
+            outEnd             = a + delta * (outLen / len);
+            return true;
+        }
+        prevLand = land;
+        prevT    = t;
+    }
+
+    outEnd = b;
+    outLen = len;
+    return false;
+}
+
+enum class AlleyRayTerminus { None, Road, Water };
+
+struct AlleyRayHit {
+    Vec2             point{};
+    float            dist = -1.f;
+    int              roadId = -1;
+    AlleyRayTerminus terminus = AlleyRayTerminus::None;
+};
+
+bool resolveAlleyRayHit(const Town& town, const TerrainAtlas* terrain, const Vec2& start,
+                        const Vec2& dir, int excludeRoadId, float maxDist, AlleyRayHit& out) {
+    out = {};
+
+    RayRoadHit roadHit;
+    const bool hasRoad =
+        rayToRoadHitExcluding(town, start, dir, excludeRoadId, maxDist, roadHit);
+
+    float waterDist = -1.f;
+    if (terrain != nullptr && terrain->valid && terrain->isBuildable(start)) {
+        Vec2        clippedEnd{};
+        float       clippedLen = 0.f;
+        const Vec2  rayEnd     = start + dir * maxDist;
+        if (clipSegmentEndAtWater(*terrain, start, rayEnd, clippedEnd, clippedLen)
+            && clippedLen >= 1.f) {
+            waterDist = clippedLen;
+        }
+    }
+
+    const bool waterWins =
+        waterDist >= 1.f && (!hasRoad || waterDist + 1e-3f < roadHit.dist);
+    if (waterWins) {
+        out.point    = start + dir * waterDist;
+        out.dist     = waterDist;
+        out.roadId   = -1;
+        out.terminus = AlleyRayTerminus::Water;
+        return true;
+    }
+
+    if (hasRoad) {
+        out.point    = roadHit.point;
+        out.dist     = roadHit.dist;
+        out.roadId   = roadHit.roadId;
+        out.terminus = AlleyRayTerminus::Road;
+        return true;
+    }
+
+    return false;
 }
 
 void recordQualityReject(AlleyProbeStats* stats, AlleyQualityReject reject) {
@@ -264,8 +359,8 @@ float scoreTurnCandidate(const Town& town, const AlleyProbeCandidate& probe, flo
 
 bool trySimulateTurnAngle(Town& town, const WallGap& gap, float minLength, float maxLength,
                           float setback, float minSideRoadDist, const DefCache& defs,
-                          const AlleyProbeCandidate& stubProbe, float turnAngle,
-                          AlleyProbeCandidate& outProbe) {
+                          const TerrainAtlas* terrain, const AlleyProbeCandidate& stubProbe,
+                          float turnAngle, AlleyProbeCandidate& outProbe) {
     if (stubProbe.segments.empty()) {
         return false;
     }
@@ -295,12 +390,12 @@ bool trySimulateTurnAngle(Town& town, const WallGap& gap, float minLength, float
 
     for (int chain = 0; chain < 8; ++chain) {
         const float remaining = maxDist - totalLen;
-        RayRoadHit  hit;
-        if (!rayToRoadHitExcluding(town, start, dir, excludeRoadId, remaining, hit)) {
+        AlleyRayHit hit;
+        if (!resolveAlleyRayHit(town, terrain, start, dir, excludeRoadId, remaining, hit)) {
             return false;
         }
 
-        const float segmentLen = (hit.point - start).length();
+        const float segmentLen = hit.dist;
         if (segmentLen < minLength) {
             return false;
         }
@@ -315,14 +410,16 @@ bool trySimulateTurnAngle(Town& town, const WallGap& gap, float minLength, float
         }
         collectAuxiliaryDemolitionsForAlley(start, hit.point, roadHalfWidth, town,
                                             outProbe.demolitions);
-        if (!segmentClearsRoadSetback(start, hit.point, town, gap.roadId, spawnInset, hit.roadId)) {
+        if (!segmentClearsRoadSetback(start, hit.point, town, gap.roadId, spawnInset,
+                                      hit.roadId)) {
             return false;
         }
 
         const Vec2 segmentStart = outProbe.segments.size() == 1 ? turnPoint : start;
         outProbe.segments.push_back({segmentStart, hit.point, hit.roadId});
 
-        if (hit.roadId < 0 || hit.roadId >= static_cast<int>(town.roads.size())
+        if (hit.terminus == AlleyRayTerminus::Water
+            || hit.roadId < 0 || hit.roadId >= static_cast<int>(town.roads.size())
             || !town.roads[static_cast<std::size_t>(hit.roadId)].isSecondary) {
             return true;
         }
@@ -338,9 +435,10 @@ bool trySimulateTurnAngle(Town& town, const WallGap& gap, float minLength, float
 bool selectBestTurnFromStub(Town& town, const WallGap& gap, float gapT, float angleDeg,
                             float minLength, float maxLength, float setback,
                             const TownConfig& townCfg, const DefCache& defs,
-                            const AlleyProbeCandidate& stubProbe, AlleyProbeCandidate& outProbe,
-                            float& outTurnAngleDeg, bool& outPerfect, AlleyProbeStats* stats,
-                            int townSeed, int queueIndex, AlleyProbeViz* outViz = nullptr) {
+                            const TerrainAtlas* terrain, const AlleyProbeCandidate& stubProbe,
+                            AlleyProbeCandidate& outProbe, float& outTurnAngleDeg, bool& outPerfect,
+                            AlleyProbeStats* stats, int townSeed, int queueIndex,
+                            AlleyProbeViz* outViz = nullptr) {
     outPerfect = false;
     if (stubProbe.segments.empty()) {
         return false;
@@ -368,7 +466,7 @@ bool selectBestTurnFromStub(Town& town, const WallGap& gap, float gapT, float an
     for (float turnAngle : turnAngles) {
         AlleyProbeCandidate attempt;
         if (!trySimulateTurnAngle(town, gap, minLength, maxLength, setback, spawnInset, defs,
-                                  stubProbe, turnAngle, attempt)) {
+                                  terrain, stubProbe, turnAngle, attempt)) {
             continue;
         }
 
@@ -407,8 +505,8 @@ bool selectBestTurnFromStub(Town& town, const WallGap& gap, float gapT, float an
 bool simulateProbeThroughAlley(const Town& town, const WallGap& gap, float gapT, float angleDeg,
                                float minLength, float maxLength, float setback,
                                float minSideRoadDist, const DefCache& defs,
-                               AlleyProbeCandidate& outProbe, AlleyProbeStats* stats = nullptr,
-                               AlleyProbeViz* outViz = nullptr) {
+                               const TerrainAtlas* terrain, AlleyProbeCandidate& outProbe,
+                               AlleyProbeStats* stats = nullptr, AlleyProbeViz* outViz = nullptr) {
     if (stats != nullptr) {
         ++stats->probes;
     }
@@ -441,8 +539,8 @@ bool simulateProbeThroughAlley(const Town& town, const WallGap& gap, float gapT,
 
     for (int chain = 0; chain < 8; ++chain) {
         const float remaining = maxDist - totalLen;
-        RayRoadHit  hit;
-        if (!rayToRoadHitExcluding(town, start, dir, excludeRoadId, remaining, hit)) {
+        AlleyRayHit hit;
+        if (!resolveAlleyRayHit(town, terrain, start, dir, excludeRoadId, remaining, hit)) {
             if (stats != nullptr) {
                 ++stats->noRayHit;
             }
@@ -451,7 +549,7 @@ bool simulateProbeThroughAlley(const Town& town, const WallGap& gap, float gapT,
             return false;
         }
 
-        const float segmentLen = (hit.point - start).length();
+        const float segmentLen = hit.dist;
         if (segmentLen < minLength) {
             if (stats != nullptr) {
                 ++stats->tooShort;
@@ -485,10 +583,15 @@ bool simulateProbeThroughAlley(const Town& town, const WallGap& gap, float gapT,
             return false;
         }
 
+        if (hit.terminus == AlleyRayTerminus::Water && stats != nullptr) {
+            ++stats->waterStop;
+        }
+
         const Vec2 segmentStart = outProbe.segments.empty() ? gapPoint : start;
         outProbe.segments.push_back({segmentStart, hit.point, hit.roadId});
 
-        if (hit.roadId < 0 || hit.roadId >= static_cast<int>(town.roads.size())
+        if (hit.terminus == AlleyRayTerminus::Water
+            || hit.roadId < 0 || hit.roadId >= static_cast<int>(town.roads.size())
             || !town.roads[static_cast<std::size_t>(hit.roadId)].isSecondary) {
             return true;
         }
@@ -513,8 +616,8 @@ bool simulateProbeThroughAlley(const Town& town, const WallGap& gap, float gapT,
 
 bool simulateDepthCapStub(Town& town, const WallGap& gap, float gapT, float angleDeg, float minLength,
                             float setback, float minSideRoadDist, const DefCache& defs,
-                            AlleyProbeCandidate& outProbe, AlleyProbeStats* stats = nullptr,
-                            AlleyProbeViz* outViz = nullptr) {
+                            const TerrainAtlas* terrain, AlleyProbeCandidate& outProbe,
+                            AlleyProbeStats* stats = nullptr, AlleyProbeViz* outViz = nullptr) {
     outProbe.gap           = gap;
     outProbe.segments.clear();
     outProbe.demolitions.clear();
@@ -546,7 +649,19 @@ bool simulateDepthCapStub(Town& town, const WallGap& gap, float gapT, float angl
         return false;
     }
 
-    const Vec2 turnPoint = gapPoint + inward * depthCap;
+    Vec2  turnPoint = gapPoint + inward * depthCap;
+    float stubLen   = depthCap;
+    if (terrain != nullptr && terrain->valid) {
+        clipSegmentEndAtWater(*terrain, gapPoint, turnPoint, turnPoint, stubLen);
+    }
+    if (stubLen < minLength || stubLen <= 1e-3f) {
+        if (stats != nullptr) {
+            ++stats->depthStubFail;
+        }
+        fillProbeViz(outViz, gapPoint, gapPoint + inward * std::max(depthCap, minLength));
+        return false;
+    }
+
     if (alleySegmentBlockedByMain(gapPoint, turnPoint, roadHalfWidth, town, defs)) {
         if (stats != nullptr) {
             ++stats->blockedByMain;
@@ -565,6 +680,9 @@ bool simulateDepthCapStub(Town& town, const WallGap& gap, float gapT, float angl
     }
 
     outProbe.segments.push_back({gapPoint, turnPoint, -1});
+    if (terrain != nullptr && terrain->valid && stubLen < depthCap - 1e-3f && stats != nullptr) {
+        ++stats->waterStop;
+    }
     return true;
 }
 
@@ -625,12 +743,13 @@ bool applyAlleyProbe(Town& town, const AlleyProbeCandidate& probe, int queueInde
 
 bool probeThroughAlley(Town& town, const WallGap& gap, float gapT, float angleDeg, float minLength,
                        float maxLength, float setback, const TownConfig& townCfg,
-                       const DefCache& defs, int queueIndex,
+                       const DefCache& defs, const TerrainAtlas* terrain, int queueIndex,
                        std::vector<SecondaryRoadRecord>& outRecords,
                        AlleyProbeStats* stats = nullptr, AlleyProbeViz* outViz = nullptr) {
     AlleyProbeCandidate probe;
     if (!simulateProbeThroughAlley(town, gap, gapT, angleDeg, minLength, maxLength, setback,
-                                   townCfg.minAlleySideRoadDist, defs, probe, stats, outViz)) {
+                                   townCfg.minAlleySideRoadDist, defs, terrain, probe, stats,
+                                   outViz)) {
         return false;
     }
 
@@ -649,17 +768,19 @@ bool probeThroughAlley(Town& town, const WallGap& gap, float gapT, float angleDe
 
 bool probeAlleyWithFallback(Town& town, const WallGap& gap, float gapT, float angleDeg,
                             float minLength, float maxLength, float setback,
-                            const TownConfig& townCfg, const DefCache& defs, int queueIndex,
-                            int townSeed, std::vector<SecondaryRoadRecord>& outRecords,
+                            const TownConfig& townCfg, const DefCache& defs,
+                            const TerrainAtlas* terrain, int queueIndex, int townSeed,
+                            std::vector<SecondaryRoadRecord>& outRecords,
                             AlleyProbeStats* stats = nullptr, AlleyProbeViz* outViz = nullptr) {
     if (probeThroughAlley(town, gap, gapT, angleDeg, minLength, maxLength, setback, townCfg,
-                          defs, queueIndex, outRecords, stats, outViz)) {
+                          defs, terrain, queueIndex, outRecords, stats, outViz)) {
         return true;
     }
 
     AlleyProbeCandidate stubProbe;
     if (!simulateDepthCapStub(town, gap, gapT, angleDeg, minLength, setback,
-                              townCfg.minAlleySideRoadDist, defs, stubProbe, stats, outViz)) {
+                              townCfg.minAlleySideRoadDist, defs, terrain, stubProbe, stats,
+                              outViz)) {
         return false;
     }
 
@@ -677,8 +798,8 @@ bool probeAlleyWithFallback(Town& town, const WallGap& gap, float gapT, float an
     float               turnAngleDeg = 0.f;
     bool                turnPerfect  = false;
     if (selectBestTurnFromStub(town, gap, gapT, angleDeg, minLength, maxLength, setback, townCfg,
-                               defs, stubProbe, turnProbe, turnAngleDeg, turnPerfect, stats,
-                               townSeed, queueIndex, outViz)) {
+                               defs, terrain, stubProbe, turnProbe, turnAngleDeg, turnPerfect,
+                               stats, townSeed, queueIndex, outViz)) {
         turnProbe.placementKind = AlleyPlacementKind::Turn;
         turnProbe.turnAngleDeg  = turnAngleDeg;
         if (!turnPerfect) {
@@ -699,34 +820,41 @@ struct GapCandidate {
 
 std::vector<GapCandidate> collectOrderedRoadGaps(Town& town, float minGapWidth, int forceRoadId,
                                                  float maxDistInclusive) {
-    std::vector<WallGap> gaps;
-    collectWallGapsInDistRange(town, minGapWidth, maxDistInclusive, gaps);
-
     std::vector<GapCandidate> candidates;
-    candidates.reserve(gaps.size());
-    for (const WallGap& gap : gaps) {
-        if (forceRoadId >= 0 && gap.roadId != forceRoadId) {
+    candidates.reserve(town.frontiers.alley.size());
+    for (const AlleyFrontierRef& ref : town.frontiers.alley) {
+        if (ref.centerDist > maxDistInclusive + 1e-3f) {
             continue;
         }
-        if (isAlleyGapChecked(town, gap)) {
+        if (forceRoadId >= 0 && ref.roadId != forceRoadId) {
             continue;
         }
-        if (!bankHasBuildingOnSide(town, gap.roadId, gap.bankIndex)) {
+        if (ref.tMax - ref.tMin + 1e-3f < minGapWidth) {
             continue;
         }
-        const Vec2 mid = gap.gapMidPoint();
-        candidates.push_back({gap, (mid - town.center).length()});
+        if (ref.roadId < 0 || ref.roadId >= static_cast<int>(town.roads.size())) {
+            continue;
+        }
+        const Road&             road = town.roads[static_cast<std::size_t>(ref.roadId)];
+        const RoadSideFrontage* side = road.sideBank(ref.bankIndex);
+        if (side == nullptr) {
+            continue;
+        }
+        for (const RoadFrontageSegment& segment : side->wallSegments) {
+            if (segment.id != ref.segmentId) {
+                continue;
+            }
+            const WallGap gap = wallGapFromSegment(road, ref.bankIndex, segment);
+            if (isAlleyGapChecked(town, gap)) {
+                continue;
+            }
+            if (!bankHasBuildingOnSide(town, gap.roadId, gap.bankIndex)) {
+                continue;
+            }
+            candidates.push_back({gap, ref.centerDist});
+            break;
+        }
     }
-
-    std::sort(candidates.begin(), candidates.end(), [](const GapCandidate& a, const GapCandidate& b) {
-        if (std::abs(a.centerDist - b.centerDist) > 1e-3f) {
-            return a.centerDist < b.centerDist;
-        }
-        if (a.gap.roadId != b.gap.roadId) {
-            return a.gap.roadId < b.gap.roadId;
-        }
-        return a.gap.tMin < b.gap.tMin;
-    });
     return candidates;
 }
 
@@ -802,7 +930,8 @@ void enqueuePendingAlleyFill(Town& town, int addedAtQueueIndex, int hostRoadId) 
 
 bool tryAddSecondaryRoad(Town& town, int queueIndex, float setback, const TownConfig& townCfg,
                          const DefCache& defs, PlacementSearchLog& /*searchLog*/, int& outRoadId,
-                         int forceRoadId, const std::vector<int>& /*junctionHops*/, int townSeed) {
+                         int forceRoadId, const std::vector<int>& /*junctionHops*/, int townSeed,
+                         const TerrainAtlas* terrain) {
     PROFILE_SCOPE(ProfileScopeId::AlleyProbe);
     outRoadId = -1;
 
@@ -877,7 +1006,7 @@ bool tryAddSecondaryRoad(Town& town, int queueIndex, float setback, const TownCo
                 std::vector<SecondaryRoadRecord> records;
                 AlleyProbeViz                    failedViz;
                 if (!probeAlleyWithFallback(town, gap, gapT, angle, townCfg.minAlleyLength,
-                                            townCfg.maxAlleyLength, setback, townCfg, defs,
+                                            townCfg.maxAlleyLength, setback, townCfg, defs, terrain,
                                             queueIndex, townSeed, records, &gapStats, &failedViz)) {
                     if (queueIndex >= 0 && failedViz.valid) {
                         recordAlleyProbe(town, queueIndex,
@@ -889,9 +1018,9 @@ bool tryAddSecondaryRoad(Town& town, int queueIndex, float setback, const TownCo
                 for (SecondaryRoadRecord& rec : records) {
                     rec.addedAtQueueIndex = queueIndex;
                     town.secondaryRoadRecords.push_back(rec);
+                    applySecondaryRoadRecord(town, rec, terrain);
                 }
 
-                rebuildSecondaryRoadsFromRecords(town, nullptr);
                 outRoadId = -1;
                 for (const Road& road : town.roads) {
                     if (road.isSecondary && road.addedAtQueueIndex == queueIndex) {
@@ -985,25 +1114,41 @@ bool tryAddSecondaryRoad(Town& town, int queueIndex, float setback, const TownCo
     return false;
 }
 
+bool removeSecondaryRecordsBlockedByMainFootprint(Town& town, const BuildingFootprint& footprint,
+                                                  int hostRoadId, const TerrainAtlas* terrain) {
+    constexpr float kAlleySetback = 0.5f;
+    const std::size_t             before = town.secondaryRoadRecords.size();
+    town.secondaryRoadRecords.erase(
+        std::remove_if(town.secondaryRoadRecords.begin(), town.secondaryRoadRecords.end(),
+                       [&](const SecondaryRoadRecord& rec) {
+                           return segmentIntersectsFootprint(rec.a, rec.b, footprint)
+                                  || footprintOverlapsAlleys(footprint, town, kAlleySetback,
+                                                             hostRoadId);
+                       }),
+        town.secondaryRoadRecords.end());
+    if (town.secondaryRoadRecords.size() == before) {
+        return false;
+    }
+
+    Logger::log("layout",
+                "alley_records_removed: host_road=" + std::to_string(hostRoadId) + " removed="
+                    + std::to_string(before - town.secondaryRoadRecords.size()));
+    town.checkedAlleyGaps.clear();
+    rebuildSecondaryRoadsFromRecords(town, terrain);
+    return true;
+}
+
 bool removeAlleysThroughSecondaryBuildings(Town& town) {
+    PROFILE_SCOPE(ProfileScopeId::SyncAlleyCleanup);
     bool removed = false;
     for (const BuildingInstance& instance : town.buildingInstances) {
-        if (instance.placementMode != BuildingPlacementMode::SegmentGapFill || instance.footprints.empty()) {
+        if (instance.placementMode != BuildingPlacementMode::SegmentGapFill
+            || instance.footprints.empty()) {
             continue;
         }
-        const BuildingFootprint& footprint = instance.footprints[0];
-        const std::size_t before = town.secondaryRoadRecords.size();
-        town.secondaryRoadRecords.erase(
-            std::remove_if(town.secondaryRoadRecords.begin(), town.secondaryRoadRecords.end(),
-                           [&](const SecondaryRoadRecord& rec) {
-                               return segmentIntersectsMainFootprints(rec.a, rec.b, town)
-                                      || footprintOverlapsAlleys(footprint, town, 0.5f, instance.roadId);
-                           }),
-            town.secondaryRoadRecords.end());
-        removed = removed || town.secondaryRoadRecords.size() != before;
-    }
-    if (removed) {
-        rebuildSecondaryRoadsFromRecords(town);
+        removed = removeSecondaryRecordsBlockedByMainFootprint(town, instance.footprints[0],
+                                                               instance.roadId, nullptr)
+                  || removed;
     }
     return removed;
 }

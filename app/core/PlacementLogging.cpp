@@ -8,6 +8,16 @@
 
 #include <algorithm>
 
+namespace {
+
+bool g_verbosePlacementLogs = false;
+
+}  // namespace
+
+void setVerbosePlacementLogs(bool enabled) { g_verbosePlacementLogs = enabled; }
+
+bool verbosePlacementLogs() { return g_verbosePlacementLogs; }
+
 void resetPlacementSearchLog(PlacementSearchLog& log) {
     log.totalValid            = 0;
     log.chosenRoadCandidate   = -1;
@@ -60,6 +70,9 @@ void recordDimReject(RoadSearchStats& stats, DimReject reason) {
 
 void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
                           const PlotConfig& plots, const DefCache& defs) {
+    if (!g_verbosePlacementLogs) {
+        return;
+    }
     Logger::log("placement", "=== placement #" + std::to_string(log.buildingId) + " type="
                              + log.buildingType + " ===");
     Logger::log("placement", "constraints: max_aspect_ratio="
@@ -242,17 +255,31 @@ void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
 }
 
 void logSegmentInventory(const Town& town) {
-    int count = 0;
-    for (const Road& road : town.roads) {
-        count += static_cast<int>(road.sideA.segments.size() + road.sideB.segments.size());
+    if (!g_verbosePlacementLogs) {
+        return;
     }
-    Logger::log("segments", "=== frontage segments after carve: count=" + std::to_string(count)
+    int frontageCount = 0;
+    int wallCount     = 0;
+    for (const Road& road : town.roads) {
+        frontageCount +=
+            static_cast<int>(road.sideA.segments.size() + road.sideB.segments.size());
+        wallCount += static_cast<int>(road.sideA.wallSegments.size() + road.sideB.wallSegments.size());
+    }
+    Logger::log("segments", "=== frontage segments after carve: count="
+                                + std::to_string(frontageCount) + " wall=" + std::to_string(wallCount)
                                 + " ===");
     for (const Road& road : town.roads) {
         for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
             const RoadSideFrontage* side = road.sideBank(bankIndex);
             for (const RoadFrontageSegment& segment : side->segments) {
                 Logger::log("segments", "segment seg=" + std::to_string(segment.id) + " road="
+                                            + std::to_string(road.id) + " bank="
+                                            + std::to_string(bankIndex) + " width="
+                                            + fmt1(segment.width()) + " center_dist="
+                                            + fmt1(segment.centerDist));
+            }
+            for (const RoadFrontageSegment& segment : side->wallSegments) {
+                Logger::log("segments", "wall seg=" + std::to_string(segment.id) + " road="
                                             + std::to_string(road.id) + " bank="
                                             + std::to_string(bankIndex) + " width="
                                             + fmt1(segment.width()) + " center_dist="
@@ -265,6 +292,9 @@ void logSegmentInventory(const Town& town) {
 void logSegmentProbe(int buildingId, const FrontageSlot& slot, const char* result,
                      DimReject reject, float depthCap, float frontageNeed, float areaFit,
                      float slotT) {
+    if (!g_verbosePlacementLogs) {
+        return;
+    }
     std::string line = "segment_probe: placement #" + std::to_string(buildingId) + " seg="
                        + std::to_string(slot.segmentId) + " road=" + std::to_string(slot.roadId)
                        + " bank=" + std::to_string(slot.bankIndex) + " width=" + fmt1(slot.width())
@@ -285,5 +315,31 @@ void logSegmentProbe(int buildingId, const FrontageSlot& slot, const char* resul
         line += " area_fit=" + fmt1(areaFit);
     }
     Logger::log("probe", line);
+}
+
+std::string formatPlacementSearchSummary(const PlacementSearchLog& log) {
+    int dimRoadShort = 0;
+    int dimRatio     = 0;
+    int dimArea      = 0;
+    int dimDepth     = 0;
+    int dimNoDepth   = 0;
+    int dimInvalid   = 0;
+    int overlap      = 0;
+    for (const auto& [_, stats] : log.roads) {
+        dimRoadShort += stats.dimRoadShort;
+        dimRatio += stats.dimRatio;
+        dimArea += stats.dimArea;
+        dimDepth += stats.dimDepth;
+        dimNoDepth += stats.dimNoDepth;
+        dimInvalid += stats.dimInvalid;
+        overlap += stats.overlap;
+    }
+    return "search slots=" + std::to_string(log.slotsExamined) + " zone_skip="
+           + std::to_string(log.zoneFiltered) + " dim_fail=" + std::to_string(log.dimFailedSegments)
+           + " summary=" + log.resultSummary + " rejects(road_short=" + std::to_string(dimRoadShort)
+           + " ratio=" + std::to_string(dimRatio) + " area=" + std::to_string(dimArea)
+           + " depth=" + std::to_string(dimDepth) + " no_depth=" + std::to_string(dimNoDepth)
+           + " invalid=" + std::to_string(dimInvalid) + " overlap=" + std::to_string(overlap)
+           + ")";
 }
 

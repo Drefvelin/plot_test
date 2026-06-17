@@ -7,12 +7,14 @@
 #include "PlotDimensions.h"
 #include "PlotGeometry.h"
 #include "RoadExhaustion.h"
+#include "PlacementFrontier.h"
 #include "Profile.h"
 #include "TerrainAtlas.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <unordered_set>
 #include <limits>
 #include <vector>
 
@@ -241,12 +243,44 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
     searchLog.zoneBias     = prep.zoneBias;
     searchLog.zoneType     = prep.zoneType;
 
-    const bool logProbes = roadFilter < 0;
+    const bool logProbes = verbosePlacementLogs() && roadFilter < 0;
 
-    std::vector<FrontageSlot> slots;
-    collectFrontageSlots(town, defs, buildingType, prep.townGrowth, slots, bandFilter, roadFilter);
+    const bool          useFrontier = roadFilter < 0;
+    const FrontierBandSet frontierBands =
+        frontierBandsFromDistFilter(town, bandFilter.minDistInclusive, bandFilter.maxDistInclusive,
+                                    bandFilter.enabled);
+    const float minPlotWidth = town.syncMinPlotFrontage;
 
-    for (const FrontageSlot& slot : slots) {
+    std::vector<FrontageSlot> collectedSlots;
+    if (!useFrontier) {
+        collectFrontageSlots(town, defs, buildingType, prep.townGrowth, collectedSlots, bandFilter,
+                             roadFilter);
+    }
+
+    std::unordered_set<int> skippedSegments;
+    std::size_t             collectedIndex = 0;
+
+    while (true) {
+        FrontageSlot slot{};
+        if (useFrontier) {
+            FrontierRef ref;
+            if (!peekClosestPlotRef(town, frontierBands, minPlotWidth, skippedSegments, ref)) {
+                break;
+            }
+            if (!fillFrontageSlotFromRef(town, ref, false, slot)) {
+                skippedSegments.insert(ref.segmentId);
+                continue;
+            }
+            skippedSegments.insert(ref.segmentId);
+            const char* zone = zoneTypeForBuilding(defs, buildingType);
+            slot.zoneScore   = scoreSegmentForZone(town, slot, zone, prep.townGrowth);
+        } else {
+            if (collectedIndex >= collectedSlots.size()) {
+                break;
+            }
+            slot = collectedSlots[collectedIndex++];
+        }
+
         if (slot.roadId < 0 || slot.roadId >= static_cast<int>(town.roads.size())) {
             continue;
         }
@@ -264,7 +298,7 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
             }
             continue;
         }
-        if (slot.zoneScore > 1e8f) {
+        if (!useFrontier && slot.zoneScore > 1e8f) {
             ++searchLog.zoneFiltered;
             if (logProbes) {
                 logSegmentProbe(out.id, slot, "zone_inner");
@@ -286,9 +320,13 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
         ++roadStats.roadsChecked;
 
         const Vec2 sortCenter = town.center;
-        const SegmentPlacementResult attempt = trySegmentPositions(
-            town, slot, buildingType, defs, plots, a, edgeDir, sideData->inward, prep.targetArea,
-            orientOrder, out.id, sortCenter, terrain, &prep.plotAreaBand);
+        SegmentPlacementResult attempt{};
+        {
+            PROFILE_SCOPE(ProfileScopeId::PlotTrySegment);
+            attempt = trySegmentPositions(
+                town, slot, buildingType, defs, plots, a, edgeDir, sideData->inward, prep.targetArea,
+                orientOrder, out.id, sortCenter, terrain, &prep.plotAreaBand);
+        }
 
         if (!attempt.placed) {
             ++searchLog.dimFailedSegments;
@@ -317,17 +355,21 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
         out.roadId        = slot.roadId;
         out.roadBank      = slot.bankIndex;
         out.plot          = attempt.plot;
-        if (!layoutBuildingsOnPlot(out.plot, town, prep.buildingSpecs, out.id, townSeed,
-                                   out.footprints)) {
-            ++searchLog.dimFailedSegments;
-            if (logProbes) {
-                logSegmentProbe(out.id, slot, "layout_main_failed", DimReject::None, -1.f, -1.f, -1.f);
-                Logger::log("probe", "segment_slide: placement #" + std::to_string(out.id) + " seg="
-                                         + std::to_string(slot.segmentId)
-                                         + " result=layout_main_failed (plot fits but main building "
-                                           "footprint does not)");
+        {
+            PROFILE_SCOPE(ProfileScopeId::PlotLayout);
+            if (!layoutBuildingsOnPlot(out.plot, town, prep.buildingSpecs, out.id, townSeed,
+                                       out.footprints)) {
+                ++searchLog.dimFailedSegments;
+                if (logProbes) {
+                    logSegmentProbe(out.id, slot, "layout_main_failed", DimReject::None, -1.f, -1.f,
+                                    -1.f);
+                    Logger::log("probe", "segment_slide: placement #" + std::to_string(out.id)
+                                             + " seg=" + std::to_string(slot.segmentId)
+                                             + " result=layout_main_failed (plot fits but main "
+                                               "building footprint does not)");
+                }
+                continue;
             }
-            continue;
         }
 
         bool footprintTerrainOk = true;
@@ -367,6 +409,11 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
         searchLog.layoutPlaced  = static_cast<int>(out.footprints.size());
 
         carveRoadFrontageForPlot(town, attempt.plot, plots.frontageSetback);
+        for (const BuildingFootprint& footprint : out.footprints) {
+            if (footprint.mainBuilding) {
+                carveRoadWallForFootprint(town, slot.roadId, slot.bankIndex, footprint);
+            }
+        }
 
         searchLog.chosenRoadCandidate = slot.roadId;
         searchLog.chosenRoad      = slot.roadId;
@@ -379,8 +426,8 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
         searchLog.chosenOrient    = attempt.orient;
         searchLog.chosenCenter    = plotCenter(attempt.plot);
         searchLog.resultSummary =
-            "first_valid_segment_in_zone_order seg=" + std::to_string(slot.segmentId) + " road="
-            + std::to_string(slot.roadId)
+            (useFrontier ? "frontier_closest_plot seg=" : "first_valid_segment_in_zone_order seg=")
+            + std::to_string(slot.segmentId) + " road=" + std::to_string(slot.roadId)
             + " zone_score=" + fmt1(slot.zoneScore) + " center_dist=" + fmt1(slot.centerDist)
             + " orient=" + orientationName(attempt.orient)
             + (searchLog.layoutPlaced < searchLog.layoutRequested

@@ -69,7 +69,8 @@ void App::drawCenterCross(sf::RenderTexture& target, float cx, float cy) const {
 }
 
 void App::buildDiagram() {
-    town_ = TownBuilder::build(config_, terrainAtlas_.valid ? &terrainAtlas_ : nullptr);
+    town_ = TownBuilder::build(config_, terrainAtlas_.valid ? &terrainAtlas_ : nullptr,
+                               placementFloors_, townConfig_);
 
     const unsigned texW = static_cast<unsigned>(config_.renderWidth());
     const unsigned texH = static_cast<unsigned>(config_.renderHeight());
@@ -151,6 +152,10 @@ void App::drawBuildingLabels() {
     drawIdLabels(town_.buildingLabels);
 }
 
+void App::drawRoadLabels() {
+    drawIdLabels(town_.roadLabels);
+}
+
 int App::effectiveAutoGrowTarget() const {
     if (growthAuto_.autoGrow > 0) {
         return std::min(growthAuto_.autoGrow, growthQueue_.maxBuildings());
@@ -169,7 +174,7 @@ void App::tickAutoGrow() {
 
     const int active = growthQueue_.activeCount();
     if (active >= target) {
-        if (growthAuto_.autoExit) {
+        if (growthAuto_.autoExit && town_.placementQueueCursor >= target) {
             finishAutoGrowAndExit();
         }
         return;
@@ -183,10 +188,7 @@ void App::tickAutoGrow() {
         autoGrowClock_.restart();
     }
 
-    int nextCount = active + 1;
-    if (growthAuto_.autoGrowMs == 0 && growthAuto_.autoExit) {
-        nextCount = target;
-    }
+    const int nextCount = active + 1;
     growthQueue_.setActiveCount(std::min(nextCount, target));
 }
 
@@ -199,11 +201,13 @@ int App::finishAutoGrowAndExit() {
     const int target   = effectiveAutoGrowTarget();
     const int placed   = static_cast<int>(town_.buildingInstances.size());
     const int failures = town_.placementFailureCount;
-    const std::string summary = "ring_summary: target=" + std::to_string(target) + " placed="
-                                + std::to_string(placed) + " failures="
-                                + std::to_string(failures) + " final_suburban_max="
-                                + std::to_string(town_.suburbanMaxHop) + " final_urban_core="
-                                + std::to_string(town_.urbanCoreMaxHop);
+    std::string summary = "ring_summary: target=" + std::to_string(target) + " placed="
+                          + std::to_string(placed) + " failures=" + std::to_string(failures)
+                          + " final_suburban_max=" + std::to_string(town_.suburbanMaxHop)
+                          + " final_urban_core=" + std::to_string(town_.urbanCoreMaxHop);
+    if (!town_.placementSkipReasonsSummary.empty()) {
+        summary += " skip_reasons=" + town_.placementSkipReasonsSummary;
+    }
 
     std::cout << summary << std::endl;
     Logger::log("layout", summary);
@@ -220,14 +224,9 @@ int App::finishAutoGrowAndExit() {
 }
 
 void App::syncBuildingPlacements() {
-    int maxIndicesPerSync = 1;
-    if (growthAuto_.autoGrow > 0 && growthAuto_.autoGrowMs == 0 && growthAuto_.autoExit) {
-        maxIndicesPerSync = 0;
-    }
-
     BuildingPlacer::sync(town_, growthQueue_, defs_, config_.plots, townConfig_, config_,
                          placementFloors_, config_.world.pixelsPerUnit, config_.town.seed,
-                         terrainAtlas_.valid ? &terrainAtlas_ : nullptr, maxIndicesPerSync);
+                         terrainAtlas_.valid ? &terrainAtlas_ : nullptr);
     hud_.setPlacementFailures(town_.placementFailureCount,
                               static_cast<int>(town_.buildingInstances.size()), town_);
 }
@@ -236,8 +235,7 @@ int App::run() {
     Logger::log("app", "window opened " + std::to_string(config_.window.width) + "x"
                            + std::to_string(config_.window.height));
 
-    if (Profile::enabled() && growthAuto_.autoGrow > 0 && growthAuto_.autoGrowMs == 0
-        && growthAuto_.autoExit) {
+    if (Profile::enabled() && growthAuto_.autoGrow > 0 && growthAuto_.autoExit) {
         Profile::reset();
     }
 
@@ -308,25 +306,18 @@ int App::run() {
             camera_.handleEvent(event, window_);
         }
 
-        bool targetChanged = false;
-        if (growthQueue_.activeCount() != lastActiveCount_) {
-            lastActiveCount_ = growthQueue_.activeCount();
-            targetChanged      = true;
-        }
-
         tickAutoGrow();
         if (growthQueue_.activeCount() != lastActiveCount_) {
             lastActiveCount_ = growthQueue_.activeCount();
-            targetChanged    = true;
         }
 
-        if (targetChanged || town_.placementQueueCursor < growthQueue_.activeCount()) {
+        if (town_.placementQueueCursor < growthQueue_.activeCount()) {
             syncBuildingPlacements();
         }
 
         const int autoTarget = effectiveAutoGrowTarget();
-        if (growthAuto_.autoExit && autoTarget > 0
-            && growthQueue_.activeCount() >= autoTarget) {
+        if (growthAuto_.autoExit && autoTarget > 0 && growthQueue_.activeCount() >= autoTarget
+            && town_.placementQueueCursor >= autoTarget) {
             const int exitCode = finishAutoGrowAndExit();
             return exitCode;
         }
@@ -346,6 +337,7 @@ int App::run() {
             window_.draw(town_.roadMesh);
             window_.draw(town_.junctionMesh);
         }
+        drawRoadLabels();
         window_.draw(town_.frontageSegmentMesh);
         window_.draw(town_.frontageInwardArrowMesh);
         drawFrontageSegmentLabels();

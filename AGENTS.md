@@ -36,14 +36,14 @@ Infrastructure libraries (SFML rendering, yaml-cpp config, etc.) are fine. The r
 |------|------|
 | `Town` | Root object; owns `roads`, `junctions`, building instances, render meshes |
 | `Road` | Segment from `a` to `b`; may be primary, secondary/alley, terrain corridor, or bridge; frontage on `sideA` / `sideB` |
-| `RoadSideFrontage` | One bank of a road. Bank 0 is left of `a→b`; bank 1 is right. `exhausted` holds per-bank skip flags (`PlotDone`, `AlleyDone`, `GapDone`). |
+| `RoadSideFrontage` | One bank of a road. Bank 0 is left of `a→b`; bank 1 is right. Holds `segments` (plot frontage) and `wallSegments` (free wall gaps for alleys/gap-fill). `exhausted` holds per-bank skip flags (`PlotDone`, `AlleyDone`, `GapDone`). |
 | `Junction` | Road endpoint where roads meet; `pos` + `roadIds[]` |
 | `Plot` | Road-facing lot created only on placement: `corners[0]`–`[1]` along frontage, `[2]`–`[3]` inward |
 | `BuildingInstance` | Spawned building: `buildingType` + assigned `Plot`; lives in `Town.buildingInstances` |
 
 Build pipeline:
 
-1. `TownBuilder::build(config)` — jc_voronoi → copy road segments into `Town`; append corridors/bridges; split/cull; then `indexJunctions`, `assignRoadSideInwards(terrain)`, `buildJunctionMesh`, `resetRoadFrontageSegments` (all our code, no jc_voronoi)
+1. `TownBuilder::build(config)` — jc_voronoi → roads; corridors/bridges; `assignRoadSideInwards(terrain)`; `ensureTownFrontageInitialized` (segments + frontier once)
 2. `BuildingPlacer::sync` — place buildings using road banks, frontage segments, ray-depth checks, junctions, roads, and **`TerrainAtlas` buildability** (plot/footprint corners + edge samples; water-facing banks skipped)
 3. `App` — white disc background texture; draws `roadMesh`, `junctionMesh`, frontage overlays, buildings
 
@@ -93,12 +93,15 @@ Loaded at startup into [`DefCache`](app/core/DefCache.h):
 - `BuildingInstance` — one spawned building with its `Plot`; stored on `Town.buildingInstances`
 - **Placement model** — [`plans/placement-model.md`](plans/placement-model.md): plot is **always tried first** on every road; rural = outside suburban; urban/residential = town ring (core ⊂ suburban); `fill_in` = optional **core-only** gap-fill after plot fails (footprint-only, no plot); alleys are **roads** (same `tryPlaceOnTownRoad` path).
 - **Hop rings** — `GrowthRings.cpp` implements band expansion (`suburbanMaxHop`, `urbanCoreMaxHop`, `ringPhase`). Operational detail in [`plans/terrain-placement.md`](plans/terrain-placement.md).
-- `BuildingPlacer::sync` — walks the growth queue via `Town.placementQueueCursor`; on success pushes instance; on failure logs `placement_skipped` and **continues**; slider down trims instances with `id >= target`; logs `ring_summary` at end of each sync.
-- **Auto-grow** — CLI `--auto-grow [N] --auto-grow-ms MS --auto-exit` or config `growth:` keys; bare `--auto-grow` defaults to **200** (or `town.yml` total if higher). **G** toggles in-app auto-grow to max. `--auto-exit` prints summary and exits with failure count as exit code.
-- **Profiling** — `--profile` or `growth.profile: true` enables scoped timing buckets (`Profile.h`); batch auto-grow writes ranked summary to `profile.log` and stdout on exit. Dev command: `PlotApp.exe --auto-grow --auto-grow-ms 0 --auto-exit --profile`.
+- `BuildingPlacer::sync` — **one queue index per call**; no per-sync full carve replay, exhaustion scan, frontier rebuild, or alley-record town scan; carve + frontier refresh on success only
+- **Gap-fill / alley records** — `removeSecondaryRecordsBlockedByMainFootprint` on successful gap-fill place only (`SecondaryRoadPlacement.cpp`); not every sync
+- **Auto-grow** — CLI `--auto-grow [N]` raises target by **one building per step** (`--auto-grow-ms` interval from config, default 50 ms). Optional `--auto-exit` quits after target is reached and placed (exit code = failure count). Config `growth:` keys; bare `--auto-grow` defaults to **200** (or `town.yml` total if higher). **G** toggles in-app auto-grow to max.
+- **Growth sync** — each `BuildingPlacer::sync` handles **at most one** queue index (one building request). Slider jumps catch up one building per frame, not in a batch drain.
+- **Placement frontiers** — bootstrap once at town build; incremental bank refresh on carve; `frontierExtendBands` on ring bump with `restoreRoadWallFromInstances` when a road's zone band changes; full `restoreRoadFrontageFromInstances` on demolish; `removeBuildingInstance` for demolish (one-bank restore)
+- **Profiling** — `--profile` or `growth.profile: true` enables scoped timing (`Profile.h`); summary on `--auto-exit`. Child scopes under `PlacerSync` / `PlaceGapFill` / `MeshRebuild` break down the hot path (nested scopes overlap in totals).
 - **Junction hop cache** — `Town` caches junction BFS hops and per-road hop values (`getJunctionHops`, `getRoadHop` in `FrontageZones.cpp`); invalidated on `indexJunctions` / road topology changes. Collectors take cached hops instead of recomputing per placement attempt.
-- **Per-bank road exhaustion** — [`PlacementFloors`](app/core/PlacementFloors.h) (`minPlotFrontage`, `minGapWidth`) computed once at load from `buildings.yml` + `plots.maxDepthToFrontRatio`. Each `RoadSideFrontage.exhausted` bit skips dead banks in collectors: `PlotDone` (no segment ≥ min plot frontage), `GapDone` (no wall gap ≥ min gap width), `AlleyDone` (alley probe exhausted on that bank). Helpers in [`RoadExhaustion.h`](app/core/RoadExhaustion.h); cleared/recomputed at sync start (`initRoadExhaustionForSync`), on carve (`refreshBankExhaustionAfterCarve`), and after alley apply (`clearExhaustionAfterAlleyApply`). Growth road loops skip roads where both banks are plot- and gap-exhausted.
-- **Placement perf caches** — [`PlacementPrep`](app/core/PlacementPrep.h) hoists per-index setup (target area, specs, orientations, gap-fill fields). [`RoadAttemptMemo`](app/core/PlacementPrep.h) skips roads that already failed plot+gap for the current queue index (cleared on ring bump, topology change, or new building). Per-bank lazy depth memo on `RoadSideFrontage` (`maxPlotDepthToRoadHit` keyed by `(t, frontage, setback)`). Per-bank wall-span cache (`getCachedBuildingWallSpans`) stores occupied t-intervals; gaps derived at query time. `Town::roadTopologyGeneration` + `invalidateRoadTopologyCaches()` on secondary rebuild and direct alley push; wall-span cache cleared on place/carve per bank.
+- **Per-bank road exhaustion** — updated on carve (`refreshBankExhaustionAfterCarve`); bootstrap once. Not rescanned every sync.
+- **Placement perf caches** — [`PlacementPrep`](app/core/PlacementPrep.h) hoists per-index setup. [`RoadAttemptMemo`](app/core/PlacementPrep.h) skips roads that already failed plot+gap for the current queue index. Per-bank lazy depth memo on `RoadSideFrontage` (`maxPlotDepthToRoadHit`). Per-bank `mainOccupancyT` merged t-spans for gap-fill clip (rebuilt on carve/bootstrap). `Town.secondaryRoadIds` for fast alley overlap. `Town::roadTopologyGeneration` + `invalidateRoadTopologyCaches()` clears depth + occupancy caches on topology change.
 - `Hud` — screen-fixed bar at top; drag to set 0…max buildings; shows `{placed} placed / {target} target` and **Failures: N** under the slider (red when N > 0, green when 0). **T** / terrain toggle cycles overlay modes including **hop**. **G** toggles auto-grow.
 
 Alleys are secondary roads. They are created from primary road wall gaps on **developed banks only** (at least one building on that road+bank, plot or gap-fill). Probes run in nearest-gap order with **seeded shuffle** of gap positions and angle fan (`townSeed`); the probe ray starts inset from the wall gap for clearance, but the **placed alley** starts at the gap point on the host road centerline. Straight probes stop at the first non-source road (pass through existing alleys); on any straight failure the same `(gapT, angle)` tries a **depth stub** to `maxPlotDepthToRoadHit`, then scans a **180° turn fan** (≥19 directions, seeded shuffle). All ray hits are scored; a fully validated road-to-road turn wins, otherwise the best partial hit is used (so turns can be 30°, 45°, etc., not only 90°). Dead-end stub if no turn hit. Rejects include main-building corridor hits and alleys too parallel to another on the same bank (`min_alley_bank_angle_sep_deg`). Junctions on crossed roads via `splitRoadsAtAlleyEndpoints` (host at `alley.a`, dest at `alley.b`).
@@ -114,6 +117,8 @@ Alleys are secondary roads. They are created from primary road wall gaps on **de
 app/core/
   Town.h / Town.cpp       — data structures; junctions, frontage segments (our geometry only)
   TownBuilder.*           — jc_voronoi → Town (library confined here)
+  PlacementFrontier.cpp   — distance-bucketed frontiers; incremental refresh
+  Town.cpp                — ensureTownFrontageInitialized, applySecondaryRoadRecord, removeBuildingInstance
   BuildingPlacer.*        — plot/building placement from Town data
   App.*                   — window + render loop
   Config.*                — YAML loading

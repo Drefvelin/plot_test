@@ -2,6 +2,7 @@
 
 #include "Logger.h"
 #include "Profile.h"
+#include "PlacementFloors.h"
 #include "TownConfig.h"
 #include "RoadNetwork.h"
 #include "TerrainAtlas.h"
@@ -242,11 +243,11 @@ int syncBoundaryRoadsFromDiagram(Town& town, const jcv_diagram& diagram, float r
 
 }  // namespace
 
-Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain) {
+Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain,
+                        const PlacementFloors& floors, const TownConfig& townCfg) {
     PROFILE_SCOPE(ProfileScopeId::TownBuild);
 
     Town town;
-    const TownConfig townCfg = TownConfig::load(TownConfig::resolveTownPath());
     town.placementQueueCursor = 0;
     town.placementBumpIndex   = -1;
     town.placementBumpCount   = 0;
@@ -364,6 +365,8 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain) {
                                 + std::to_string(roadsAfterCorridors) + " roads_after_split="
                                 + std::to_string(roadsAfterSplit) + " primary_roads="
                                 + std::to_string(town.primaryRoadCount) + " boundary_source=roads");
+
+    ensureTownFrontageInitialized(town, config.plots.frontageSetback, floors, townCfg);
 
     return town;
 }

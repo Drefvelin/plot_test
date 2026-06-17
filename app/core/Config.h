@@ -89,6 +89,7 @@ struct GrowthConfig {
     int  autoGrowMs = 50;
     bool autoExit   = false;
     bool profile    = false;
+    bool verbosePlacementLogs = false;
 };
 
 struct Config {

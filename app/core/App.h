@@ -30,6 +30,7 @@ private:
     void drawFrontageSegmentLabels();
     void drawPlotLabels();
     void drawBuildingLabels();
+    void drawRoadLabels();
     void drawIdLabels(const std::vector<FrontageSegmentLabel>& labels);
 
     Config              config_;

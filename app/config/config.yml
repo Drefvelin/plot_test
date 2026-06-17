@@ -80,6 +80,7 @@ logging:
 
 growth:
   auto_grow: 0
-  auto_grow_ms: 50
+  auto_grow_ms: 50  # one building request per interval when using --auto-grow
   auto_exit: false
   profile: false
+  verbose_placement_logs: false

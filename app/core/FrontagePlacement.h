@@ -20,6 +20,7 @@ struct FrontageSlot {
     float endT       = 0.f;
     float centerDist = 0.f;
     float zoneScore  = 0.f;
+    bool  isWallGap  = false;
 
     float width() const { return endT - startT; }
 };

@@ -55,8 +55,8 @@ The Voronoi roads at town creation, terrain corridors, bridges, and **alleys** a
 
 1. Shuffle a queue of building types (houses, workshops, etc.).
 2. For each queue entry, try to place one building.
-3. **Urban/residential:** walk roads in the town ring (hop ≤ suburban max), try **plot** on each road until one succeeds.
-4. **Rural:** walk roads outside suburban, plot only.
+3. **Urban/residential:** pull closest eligible plot frontage from distance buckets (core / suburban), then gap-fill from wall-gap frontier when densifying core.
+4. **Rural:** pull closest eligible plot from rural bucket only.
 5. If the town ring is full for this building, **expand** the ring (bump) and try again.
 6. In **core densify** phase (after a bump), types with `fill_in` may also create **new alleys** from wall gaps and use **gap-fill** on core roads — still on real road frontage, still band-aware.
 
@@ -82,7 +82,8 @@ Per-road placement is centralized in `tryPlaceOnTownRoad` (`GrowthRings.cpp`): *
 
 - World units; see [`AGENTS.md`](../AGENTS.md).
 - [`Road`](../app/core/Town.h): segment `a`–`b`; flags `isSecondary`, `isBridge`, `isTerrainCorridor`.
-- [`RoadSideFrontage`](../app/core/Town.h): per-bank segments with `startT`/`endT` along the road edge.
+- [`RoadSideFrontage`](../app/core/Town.h): per-bank `segments` (plot frontage) and `wallSegments` (free wall gaps) with `startT`/`endT` along the road edge.
+- **Wall segments:** one span per bank at init `[setback, len−setback]`; carved only by `carveRoadWallForFootprint` on **main** building footprints (plot lots and gap-fill). Plot width does not carve the wall line — gaps between main fronts remain in `wallSegments`. Alley/gap-fill collectors read stored `wallSegments`.
 - [`Plot`](../app/core/Town.h): `corners[4]`, `roadId`, `roadBank`, `area`; created at placement time on the instance.
 - [`BuildingInstance`](../app/core/Town.h): `buildingType`, `plot`, `footprints`, `placementMode`.
 
@@ -124,16 +125,34 @@ Helpers: `roadHop`, `collectSuburbanRoadIds`, `collectCoreRoadIds`, `collectRura
 
 | Function | File | Role |
 |----------|------|------|
-| `collectFrontageSlots` | `FrontagePlacement.cpp` | Enumerate `(roadId, bank, segment)` candidates; zone score; hop filter. Iterates **all** non-filtered roads including `isSecondary`. |
-| `tryPlaceRoadPlot` | `FrontagePlacement.cpp` | Pick slot, depth cap via ray to nearest other road, validate plot, `layoutBuildingsOnPlot` → `PlotLot`. |
-| `tryPlaceSegmentMain` | `FrontageGapFill.cpp` | **Core densify only** for `fill_in` types: narrow gap on a road bank. Intended to be secondary to plot, not the default suburban path. |
+| `PlacementFrontier` | `PlacementFrontier.cpp` | Distance-bucketed frontiers (`plot[3]`, `wall[3]`, `alley`); rebuilt on sync init / topology change; incremental refresh on carve |
+| `peekClosestPlotSlot` / `peekClosestWallGapSlot` | `PlacementFrontier.cpp` | Pull closest-first segment in selected bands (merge ≤3 bucket heads) |
+| `collectFrontageSlots` | `FrontagePlacement.cpp` | Legacy full scan; retained for per-road `roadFilter >= 0` fallback and debug |
+| `tryPlaceRoadPlot` | `FrontagePlacement.cpp` | Frontier pull when `roadFilter < 0`; pick slot, depth cap, validate plot, `layoutBuildingsOnPlot` → `PlotLot` |
+| `tryPlaceSegmentMain` | `FrontageGapFill.cpp` | **Core densify only** for `fill_in` types: wall-gap frontier pull when `roadFilter < 0` |
 
 **Intended order per road (urban/residential):**
 
 1. `tryPlaceRoadPlot` (always).
 2. If `fill_in` && core band && `DensifyCore`: optional `tryPlaceSegmentMain` on same road (gap-fill). *Open design note:* gap-fill may remain footprint-first for tight gaps; houses should still prefer full plots — see product rule below.*
 
-**Rural:** `tryPlaceRoadPlot` only with `HopFilter::rural`.
+**Rural:** `tryPlaceRoadPlot` only with rural frontier band. Ordering is **closest-first by `centerDist`** (not rural target-distance zone score on the frontier path).
+
+### Placement frontiers (`PlacementFrontier.cpp`)
+
+Hot-path slot collection uses maintained frontiers instead of scanning all roads each attempt:
+
+| Bucket | Source segments | Band (`centerDist`) |
+|--------|-----------------|---------------------|
+| `plot[0..2]` | `side.segments` with `width >= syncMinPlotFrontage` | Core / suburban / rural |
+| `wall[0..2]` | `side.wallSegments` with `width >= syncMinGapWidth` | Same bands |
+| `alley` | Developed-bank wall gaps in core, not in `checkedAlleyGaps` | Core distance only |
+
+- **Rebuild:** `rebuildPlacementFrontier` once at town bootstrap and after full `rebuildSecondaryRoadsFromRecords` (debug/trim); `frontierExtendBands` on ring bump re-syncs **wall** geometry for roads whose distance band changed and **re-buckets plot frontier refs** (`frontierRefreshPlotBank` per bank — plot segment geometry unchanged, but refs must move e.g. Rural→Suburban when the ring expands).
+- **Incremental:** `frontierRefreshPlotBank` / `WallBank` / `AlleyBank` from carve hooks in `Town.cpp`; `frontierRefreshRoad` after incremental alley apply.
+- **Pull:** `peekClosestPlotSlot` / `peekClosestWallGapSlot` merge selected bucket heads by `centerDist`; failed attempts skip segment IDs for the rest of that placement try; successful carve refreshes the bank.
+- **Rural behavior change:** frontier path orders rural plots by distance from town centre, not `scoreSegmentForZone` rural target key.
+- **Ring bumps** remain until a follow-up replaces them with slice extension; empty frontier → existing bump loop in `BuildingPlacer.cpp`.
 
 ### Alleys
 
@@ -160,11 +179,21 @@ Helpers: `roadHop`, `collectSuburbanRoadIds`, `collectCoreRoadIds`, `collectRura
 | Plot placement API | `tryPlaceRoadPlot` | **Same** |
 | Visual / debug colour | Primary | Secondary |
 
+**Frontage debug overlay** (dashed setback lines + inward arrows, rebuilt each `BuildingPlacer::sync`):
+
+| Source | Colour | Meaning |
+|--------|--------|---------|
+| Live `side->segments` | Green | Plot frontage gaps (between plots) |
+| Live `side->wallSegments` | Yellow | Wall gaps between main building fronts |
+| `side->wallSegments` also in `frontiers.alley` | Orange | Wall gaps eligible for alley probes |
+
+Segment id labels at line midpoints. Orange highlights alley frontier membership on top of live wall geometry.
+
 Orchestration in `GrowthRings.cpp` (`tryPlaceInUrbanCore`, pending fills) should shrink over time toward “sweep roads in band, plot + optional core gap-fill” without alley-specific plot APIs.
 
 ### Growth orchestration (`BuildingPlacer::sync`)
 
-1. Reseed frontage from existing instances (carve).
+1. `ensureTownFrontageInitialized` once at town build (segments + frontier bootstrap).
 2. For each queue index until cursor reaches target:
    - **Rural** → `tryPlaceRuralOnRoads` (plot only).
    - **Urban/residential** → pending alley plot attempts (same plot API) → optional `tryPlaceInUrbanCore` when `DensifyCore` → town-ring road sweep (`tryPlaceSuburbanOnRoads`: **plot per road**, then core gap-fill only when gated) → bump loop on exhaustion.
@@ -202,16 +231,18 @@ farm:
 | Rule | Location | Status |
 |------|----------|--------|
 | Plot before gap-fill | `tryPlaceOnTownRoad` | Done |
+| Frontier plot / wall / alley pull | `PlacementFrontier.cpp`, `FrontagePlacement.cpp`, `FrontageGapFill.cpp`, `SecondaryRoadPlacement.cpp` | Done |
 | Gap-fill only in core | `mayGapFillOnRoad` | Done |
 | Gap-fill has no plot | `FrontageGapFill.cpp` → `SegmentGapFill` | By design |
 | Alleys use same per-road path | `tryFillBlockingPendingAlleys`, `tryPlaceInUrbanCore` → `tryPlaceOnTownRoad` | Done |
 | Densify core before suburban sweep | `BuildingPlacer::sync` bump loop | Done |
-| Alley gap state preserved on bump | `bumpGrowthRings` (`alley_state=preserved`) | Done |
+| Wall resync on zone change | `frontierExtendBands` → `restoreRoadWallFromInstances` when midpoint band changes | Done |
 
 ### Related files
 
 | File | Role |
 |------|------|
+| [`PlacementFrontier.cpp`](../app/core/PlacementFrontier.cpp) | Distance-bucketed plot/wall/alley frontiers |
 | [`BuildingPlacer.cpp`](../app/core/BuildingPlacer.cpp) | Growth sync, queue cursor |
 | [`GrowthRings.cpp`](../app/core/GrowthRings.cpp) | Hop bands, road sweeps, bump |
 | [`FrontagePlacement.cpp`](../app/core/FrontagePlacement.cpp) | Plot placement |
@@ -234,4 +265,4 @@ farm:
 | Date | Change |
 |------|--------|
 | 2026-06 | Initial authoritative doc: plots for all types, core-only gap-fill, alleys as roads, misconception table |
-| 2026-06 | Code aligned: `tryPlaceOnTownRoad` / `mayGapFillOnRoad`; implementation map updated |
+| 2026-06 | Frontier bucket placement: closest-first plot/wall/alley pull; rural closest-first on frontier path |

@@ -46,6 +46,7 @@ add_executable(PlotApp
     app/core/PlacementFloors.cpp
     app/core/PlacementPrep.cpp
     app/core/RoadExhaustion.cpp
+    app/core/PlacementFrontier.cpp
     app/core/SecondaryRoadPlacement.cpp
     app/core/BuildingLayout.cpp
     app/core/Hud.cpp

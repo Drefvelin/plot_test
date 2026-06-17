@@ -9,6 +9,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "PlacementFrontier.h"
+
 enum class RingPhase {
     Normal,
     DensifyCore,
@@ -48,22 +50,6 @@ struct RoadFrontageSegment {
     float width() const { return endT - startT; }
 };
 
-struct RoadWallSpan {
-    float tMin = 0.f;
-    float tMax = 0.f;
-
-    float width() const { return tMax - tMin; }
-};
-
-struct BankWallSpanCache {
-    std::uint32_t              wallSpanInstanceGen = 0;
-    std::uint32_t              wallSpanTopologyGen = 0;
-    Vec2                       origin{};
-    Vec2                       edgeDir{};
-    float                      roadLen = 0.f;
-    std::vector<RoadWallSpan>  occupiedSpans;
-};
-
 struct DepthCacheKey {
     float t        = 0.f;
     float frontage = 0.f;
@@ -96,10 +82,11 @@ struct DepthCacheKeyHash {
 struct RoadSideFrontage {
     Vec2                             inward{};
     std::vector<RoadFrontageSegment> segments;
+    std::vector<RoadFrontageSegment> wallSegments;
+    std::vector<std::pair<float, float>> mainOccupancyT;
     std::uint8_t                     exhausted = 0;
     mutable std::uint32_t              depthCacheTopologyGen = 0;
     mutable std::unordered_map<DepthCacheKey, float, DepthCacheKeyHash> depthCacheEntries;
-    mutable BankWallSpanCache          wallSpans;
 };
 
 struct Road {
@@ -277,6 +264,7 @@ struct Town {
     float             width    = 0.f;
     float             height   = 0.f;
     int               frontageSegmentIdCounter = 0;
+    int               wallSegmentIdCounter     = 0;
     sf::VertexArray   roadMesh{sf::Triangles};
     sf::VertexArray   junctionMesh{sf::Triangles};
     sf::VertexArray   roadEndProbeMesh{sf::Triangles};
@@ -288,14 +276,17 @@ struct Town {
     int               placementBumpCount     = 0;   // bumps consumed for current index (persists across syncs)
     int               placementFailureCount = 0;  // skipped slots in [0, active target)
     std::vector<int>  placementFailedIndices;     // queue indices that failed to place
+    std::string       placementSkipReasonsSummary;
     int               suburbanMaxHop = 2;
     int               urbanCoreMaxHop = -1;
     RingPhase         ringPhase = RingPhase::Normal;
     std::unordered_set<int> alleyCompleteRoadIds;
     std::vector<SecondaryRoadRecord> secondaryRoadRecords;
+    std::vector<int>                 secondaryRoadIds;
     float             syncMinPlotFrontage   = 0.f;
     float             syncMinGapWidth       = 0.f;
     float             syncMinAlleyGapWidth  = 0.f;
+    float             syncFrontageSetback   = 2.f;
     std::vector<std::vector<AlleyProbeLine>> alleyProbesByQueueIndex;
     std::unordered_set<WallGapKey, WallGapKeyHash, WallGapKeyEqual> checkedAlleyGaps;
     std::vector<PendingAlleyFill>    pendingAlleyFills;
@@ -306,6 +297,7 @@ struct Town {
     sf::VertexArray   buildingOutlineMesh{sf::Triangles};
     std::vector<FrontageSegmentLabel> plotLabels;
     std::vector<FrontageSegmentLabel> buildingLabels;
+    std::vector<FrontageSegmentLabel> roadLabels;
     std::vector<FrontageSegmentLabel> frontageSegmentLabels;
     std::vector<FrontageSegmentLabel> roadEndProbeLabels;
 
@@ -320,20 +312,47 @@ struct Town {
     mutable float              ringMeanSliceWidth = 0.f;
     mutable float              maxObservedRoadDist = 0.f;
     std::uint32_t             roadTopologyGeneration = 1;
+    std::uint64_t             cachedSecondaryRecordsFingerprint = 0;
+    bool                      frontageInitialized = false;
+    int                       alleyProbesCapacity   = 0;
+    PlacementFrontier         frontiers;
 };
+
+struct PlacementFloors;
+struct TownConfig;
+struct TerrainAtlas;
+struct SecondaryRoadRecord;
+
+void ensurePlacementSyncMins(Town& town, const PlacementFloors& floors, const TownConfig& townCfg,
+                             float frontageSetback);
+void ensureTownFrontageInitialized(Town& town, float setback, const PlacementFloors& floors,
+                                     const TownConfig& townCfg);
+void restoreBankFrontageFromInstances(Town& town, int roadId, int bankIndex, float frontageSetback);
+void restoreRoadFrontageFromInstances(Town& town, int roadId, float frontageSetback);
+void restoreBankWallFromInstances(Town& town, int roadId, int bankIndex, float frontageSetback);
+void restoreRoadWallFromInstances(Town& town, int roadId, float frontageSetback);
+void removeBuildingInstance(Town& town, int instanceId, float frontageSetback);
+void applySecondaryRoadRecord(Town& town, const SecondaryRoadRecord& rec,
+                              const TerrainAtlas* terrain = nullptr);
+
+std::uint64_t secondaryRoadRecordsFingerprint(const Town& town);
 
 void indexJunctions(Town& town);
 void buildJunctionMesh(Town& town, float pixelsPerUnit, float radiusUnits = 1.f);
 void assignRoadSideInwards(Town& town, const TerrainAtlas* terrain = nullptr);
 void buildSecondaryRoadFrontageSegments(Road& road, Town& town, float frontageSetback);
+void buildSecondaryWallSegments(Road& road, Town& town, float frontageSetback);
 void trimSecondaryRoadRecords(Town& town, int targetCount);
 void rebuildSecondaryRoadsFromRecords(Town& town, const TerrainAtlas* terrain = nullptr);
 void removeSecondaryRoadAtQueueIndex(Town& town, int queueIndex);
 void buildRoadEndProbeMesh(Town& town, float pixelsPerUnit, float probeLengthUnits = 2.f);
-void resetRoadFrontageSegments(Town& town, float frontageSetback);
+void resetRoadFrontageSegments(Town& town, float frontageSetback, bool resetSegmentIds = false);
+void resetWallSegments(Town& town, float frontageSetback, bool resetSegmentIds = false);
 void carveRoadFrontageForPlot(Town& town, const Plot& plot, float frontageSetback);
 void carveRoadFrontageForFootprint(Town& town, int roadId, int bankIndex,
                                    const BuildingFootprint& mainFootprint);
+void carveRoadWallForFootprint(Town& town, int roadId, int bankIndex,
+                               const BuildingFootprint& mainFootprint);
 bool pointInsideTownDisc(const Town& town, const Vec2& p);
 bool roadFrameForBank(const Road& road, int bankIndex, Vec2& origin, Vec2& farEnd, Vec2& edgeDir);
 void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,

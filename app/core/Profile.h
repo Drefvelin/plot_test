@@ -15,6 +15,23 @@ enum class ProfileScopeId : std::uint8_t {
     AlleyProbe,
     MeshRebuild,
     TerrainBake,
+    // PlacerSync breakdown
+    SyncAlleyCleanup,
+    PlacementPrep,
+    RingBump,
+    // PlaceGapFill / PlacePlot breakdown
+    GapFillCollect,
+    GapFillTrySlot,
+    PlotTrySegment,
+    PlotLayout,
+    FrontageWallCarve,
+    // MeshRebuild breakdown
+    MeshOutline,
+    MeshFrontageSeg,
+    MeshAlleyProbe,
+    MeshRoad,
+    MeshHopDebug,
+    MeshJunction,
     Count,
 };
 
