@@ -70,7 +70,7 @@ Build a low-res grid over diagram extent (recommended **128×128** for a 1024 di
 - For each grid cell, sample centre (or majority vote over subsamples) → dominant `TerrainKind`
 - Mark grid cell `Forbidden` if majority is sea/river
 
-**Use:** O(1) `sample(p)`; cell dominant terrain at town build; fast rejection before expensive polygon tests.
+**Use:** O(1) `sample(p)` for placement validation, segment scoring, and fast rejection before expensive polygon tests.
 
 ## Step 7 — Optional distance fields
 

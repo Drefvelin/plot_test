@@ -1,0 +1,10 @@
+#pragma once
+
+#include "DefCache.h"
+
+struct PlacementFloors {
+    float minPlotFrontage = 0.f;
+    float minGapWidth     = 0.f;
+
+    static PlacementFloors fromDefs(const DefCache& defs, float maxDepthToFrontRatio);
+};

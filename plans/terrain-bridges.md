@@ -6,14 +6,12 @@ River/sea crossings become **bridge** roads in the graph: a brown line between t
 
 ```
 Voronoi + disc roads
-  → snapshot cells
   → appendCorridorRoads
   → splitRoadsAtIntersections
   → splitRoadsAtForbiddenBoundary
   → indexJunctions
   → resolveBridges (strip → match → snap → create)
   → cullVoronoiRoadsParallelToCorridors
-  → subdivideCellsFromRoadGraph
   → buildRoadMesh (bridges brown, skip water clip)
 ```
 
@@ -66,7 +64,7 @@ colors:
   bridge: [139, 90, 43]
 ```
 
-Skipped from strip/match: secondary, terrain corridor, disc border (`cellA == cellB == -1`).
+Skipped from strip/match: secondary roads, terrain corridor roads, bridge roads, and degenerate road segments.
 
 ## Logging
 
@@ -79,6 +77,6 @@ Channel `voronoi`:
 
 - Bridges skip frontage assignment (`assignRoadSideInwards`).
 - `clip_roads_at_water` does not clip bridge segments.
-- Cell subdivision unchanged; water faces discarded by centroid.
+- Road-only placement treats bridges as road blockers for depth rays; bridges do not create frontage.
 
 See also: [terrain-roadmap.md](terrain-roadmap.md) Phase 4.

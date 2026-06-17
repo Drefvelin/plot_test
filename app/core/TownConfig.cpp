@@ -65,8 +65,8 @@ TownConfig TownConfig::load(const std::filesystem::path& path) {
         }
     }
 
-    if (root["segment_gap_fill_count"]) {
-        config.segmentGapFillCount = std::max(0, root["segment_gap_fill_count"].as<int>());
+    if (root["initial_suburban_max_hops"]) {
+        config.initialSuburbanMaxHops = std::max(0, root["initial_suburban_max_hops"].as<int>());
     }
 
     if (root["min_wall_gap_for_alley"]) {
@@ -90,6 +90,10 @@ TownConfig TownConfig::load(const std::filesystem::path& path) {
     if (root["min_alley_crossing_angle_deg"]) {
         config.minAlleyCrossingAngleDeg =
             std::max(0.f, root["min_alley_crossing_angle_deg"].as<float>());
+    }
+    if (root["min_alley_bank_angle_sep_deg"]) {
+        config.minAlleyBankAngleSepDeg =
+            std::max(0.f, root["min_alley_bank_angle_sep_deg"].as<float>());
     }
     if (root["min_alley_endpoint_spacing"]) {
         config.minAlleyEndpointSpacing =

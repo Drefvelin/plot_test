@@ -10,15 +10,15 @@ After Step 1 you can:
 - Toggle terrain overlay (3 modes: terrain+debug, debug only, off)
 - Toggle debug outlines (forbidden water, river outline, shoreline, forest, hills)
 - See primary/secondary roads **stop at water** in the mesh (visual clip only)
-- Validate the bake pipeline before touching placement or cell topology
+- Validate the bake pipeline before touching placement or road topology
 
 ## Non-goals (defer to Step 1.5 / Phase 1b)
 
 | Deferred | Why |
 |----------|-----|
-| Split `Road` records at water | Changes junctions + cell boundaries; do after bake looks correct |
+| Split `Road` records at water | Changes junctions and bridge legality; do after bake looks correct |
 | `isBuildable()` in footprint validation | Placement phase |
-| `Cell.buildable` / `dominantTerrain` | Needs grid + cell tagging |
+| Segment terrain scoring | Needs grid + frontage sampling |
 | Bridges | Needs real road splits first |
 | Voronoi site bias away from water | Step 2 |
 | Forest/hills region polygons | Phase 2 biome scoring |
@@ -113,7 +113,7 @@ Implement `TerrainAtlas bakeTerrain(const Config&, const std::filesystem::path& 
 3. **Forbidden mask:** raster pass labelling sea + river; connected components (4- or 8-neighbour); marching squares or border following for outer contour; Ramer–Douglas–Peucker with `simplify_tolerance`.
 4. **Shoreline:** pixels where sea meets non-sea; chain into polyline(s); simplify.
 5. **River skeleton (debug):** on river-only mask, use a simple thinning / distance-transform ridge or “trace centre column per scanline” fallback for v1; simplify. Perfect skeleton not required — must be visibly centred in the river for tuning.
-6. **Grid:** for each cell centre, sample labelled pixel → store kind.
+6. **Grid:** for each raster grid-cell centre, sample labelled pixel → store kind.
 
 **Query helpers on `TerrainAtlas`:**
 
@@ -171,9 +171,8 @@ Build `sf::VertexArray` **triangle meshes** (1 world unit wide, like roads) from
        draw terrainSprite   // full diagram extent, replaces white disc
    else
        draw diagramSprite   // existing white circle
-   cell highlight (if any)
    town.roadMesh            // clipped when terrain active — Task 6
-   junctions, centroids, frontage, buildings, …
+   junctions, frontage, buildings, …
    if (showTerrainDebug_)
        draw debug line meshes (on top of roads)
    HUD (screen space)
@@ -336,12 +335,12 @@ Minimum viable demo after **Tasks 1–6 + forbidden bake**: overlay toggle works
 
 ## Step 1.5 preview (next plan)
 
-Corridor roads, intersection split, and cell subdivision are implemented — see [terrain-corridor-roads.md](terrain-corridor-roads.md).
+Corridor roads, intersection split, bridges, and road-only placement are implemented — see [terrain-corridor-roads.md](terrain-corridor-roads.md) and [road-only-model.md](road-only-model.md).
 
 Remaining Step 1.5 / Phase 1b items:
 
-1. **`isBuildable()`** in footprint validation (hard reject on forbidden raster)
-2. Bridge placeholders at corridor × water gaps
+1. Biome-specific scoring from terrain coverage
+2. Feature-anchor placement for river/shore/hills buildings
 3. Tune `corridor_edge_spacing` / insets per map in `config.yml`
 
 See [terrain-roadmap.md](terrain-roadmap.md) Phase 1b and Phase 4.

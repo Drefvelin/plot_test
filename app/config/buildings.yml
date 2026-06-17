@@ -4,6 +4,7 @@
 buildings:
   house:
     type: residential
+    fill_in: true            # core gap-fill permission; all buildings use plots — see plans/placement-model.md
     rgb: [220, 180, 140]
     buildings:
       small: 1

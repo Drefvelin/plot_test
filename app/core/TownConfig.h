@@ -6,14 +6,15 @@
 
 struct TownConfig {
     std::unordered_map<std::string, int> buildingCounts;
-    int segmentGapFillCount    = 30;
+    int initialSuburbanMaxHops = 2;
     float minWallGapForAlley   = 4.f;
     float minAlleyLength       = 12.f;
     float maxAlleyLength       = 0.f;  // 0 = no cap
     float maxAlleyAngleDeg     = 20.f;  // max deviation from perpendicular inward
     float alleysPerUnitLength  = 0.25f;
     int   alleyAngleCount      = 5;
-    float minAlleyCrossingAngleDeg = 80.f;
+    float minAlleyCrossingAngleDeg   = 80.f;
+    float minAlleyBankAngleSepDeg    = 25.f;
     float minAlleyEndpointSpacing  = 20.f;
     float minAlleyCreatedArea      = 0.f;  // 0 = no minimum
     float minAlleySideRoadDist     = 0.f;  // 0 = no minimum

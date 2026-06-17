@@ -1,6 +1,7 @@
 #include "TerrainAtlas.h"
 
 #include "Logger.h"
+#include "Profile.h"
 #include "TerrainColors.h"
 #include "Units.h"
 
@@ -609,6 +610,8 @@ const char* terrainOverlayModeLabel(TerrainOverlayMode mode) {
         return "terrain+debug";
     case TerrainOverlayMode::DebugOnly:
         return "debug";
+    case TerrainOverlayMode::HopDebug:
+        return "hop";
     case TerrainOverlayMode::Off:
         return "off";
     }
@@ -675,7 +678,7 @@ void buildTerrainDebugMeshes(TerrainAtlas& atlas, float pixelsPerUnit, float con
 }
 
 TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& projectRoot) {
-    const auto start = std::chrono::steady_clock::now();
+    PROFILE_SCOPE(ProfileScopeId::TerrainBake);
     TerrainAtlas atlas;
 
     const auto imagePath  = projectRoot / config.terrain.imagePath;
@@ -800,9 +803,6 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
 
     atlas.valid = true;
 
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start);
-
     Logger::log("terrain",
                 "bake ok: image=" + imagePath.filename().string() + " size=" + std::to_string(w)
                     + "x" + std::to_string(h) + " forbidden="
@@ -831,8 +831,7 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
                                  + std::to_string(countContourVertices(atlas.shoreRoadGraph))
                                  + " river_road_nodes="
                                  + std::to_string(countContourVertices(atlas.riverRoadGraph))
-                           : std::string(" corridor_roads=off"))
-                    + " time_ms=" + std::to_string(elapsed.count()));
+                           : std::string(" corridor_roads=off")));
 
     return atlas;
 }

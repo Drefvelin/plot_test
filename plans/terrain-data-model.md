@@ -62,19 +62,39 @@ Distance queries can use segment distance against simplified polylines/polygons.
 
 ## Extensions on existing types
 
-### Cell (`Town.h`)
+### Road / frontage segment
 
-Tag each Voronoi cell once when the town is built:
+Terrain preferences should be computed from frontage segment points or sampled areas around the candidate plot. The road-only model does not store cells.
 
 ```cpp
 TerrainKind dominantTerrain = TerrainKind::Plains;
 float plainsCoverage = 1.f;   // 0..1
-bool buildable = true;        // false if mostly water / forbidden
 ```
 
-Compute by sampling the terrain grid over the cell polygon (or integrating over cell area at bake/town-build time). **Not** per placement attempt.
+Compute by sampling the terrain grid near the frontage segment midpoint or over the candidate plot footprint.
 
 ### BuildingDef (`DefCache` / `buildings.yml`)
+
+Authoritative placement semantics: [`placement-model.md`](placement-model.md).
+
+Per-type fields include `type` (`urban` | `residential` | `rural`) and optional `fill_in`:
+
+| `type` | Hop band | Plots | `fill_in: true` |
+|--------|----------|-------|-----------------|
+| `residential` / `urban` | Town ring (`hop <= suburbanMaxHop`) | **Always** | Extra **core-only** gap-fill when densifying |
+| `rural` | Outside town ring (`hop > suburbanMaxHop`) | **Always** | Ignored |
+
+Example:
+
+```yaml
+house:
+  type: residential
+  fill_in: true   # core gap-fill allowed; plots always
+
+church:
+  type: urban
+  fill_in: false  # plots only
+```
 
 Extend definitions with terrain preferences:
 
@@ -83,7 +103,7 @@ farm:
   type: rural
   terrain:
     prefer: [plains]
-    min_coverage: 0.6        # cell plains coverage threshold
+    min_coverage: 0.6        # nearby/footprint plains coverage threshold
 
 lumber_camp:
   type: rural

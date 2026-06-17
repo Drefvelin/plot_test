@@ -1,7 +1,8 @@
 #include "TownBuilder.h"
 
-#include "CellSubdivision.h"
 #include "Logger.h"
+#include "Profile.h"
+#include "TownConfig.h"
 #include "RoadNetwork.h"
 #include "TerrainAtlas.h"
 #include "Units.h"
@@ -10,7 +11,6 @@
 #include "third_party/jc_voronoi.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <map>
 #include <random>
@@ -162,12 +162,6 @@ void buildRoadMesh(Town& town, const Config& config, const TerrainAtlas* terrain
                     config.world.pixelsPerUnit, terrain, config.terrain.clipRoadsAtWater);
 }
 
-void addRoadToCell(Cell& cell, int roadId) {
-    if (std::find(cell.roadIds.begin(), cell.roadIds.end(), roadId) == cell.roadIds.end()) {
-        cell.roadIds.push_back(roadId);
-    }
-}
-
 using EndpointKey = std::pair<int, int>;
 
 EndpointKey quantizePoint(const Vec2& p) {
@@ -186,7 +180,7 @@ std::pair<EndpointKey, EndpointKey> normalizedEndpointKey(const Vec2& a, const V
 
 int findOrCreateBoundaryRoad(Town& town,
                              std::map<std::pair<EndpointKey, EndpointKey>, int>& roadByEndpoints,
-                             const Vec2& aUnits, const Vec2& bUnits, int cellA, int cellB) {
+                             const Vec2& aUnits, const Vec2& bUnits) {
     const auto key = normalizedEndpointKey(aUnits, bUnits);
     const auto existing = roadByEndpoints.find(key);
     if (existing != roadByEndpoints.end()) {
@@ -197,32 +191,27 @@ int findOrCreateBoundaryRoad(Town& town,
     road.id    = static_cast<int>(town.roads.size());
     road.a     = aUnits;
     road.b     = bUnits;
-    road.cellA = cellA;
-    road.cellB = cellB;
     town.roads.push_back(road);
     roadByEndpoints[key] = road.id;
     return road.id;
 }
 
-// Ensures each cell's roadIds lists every clipped boundary segment (bisectors + clip border).
-// Simulates what an Unreal generator would emit as a complete per-cell edge ring.
-int syncCellBoundaryRoadsFromDiagram(Town& town, const jcv_diagram& diagram, float renderW,
-                                     float renderH, const Vec2& centerPx, float radiusPx,
-                                     float pixelsPerUnit) {
+int syncBoundaryRoadsFromDiagram(Town& town, const jcv_diagram& diagram, float renderW,
+                                 float renderH, const Vec2& centerPx, float radiusPx,
+                                 float pixelsPerUnit) {
     std::map<std::pair<EndpointKey, EndpointKey>, int> roadByEndpoints;
     for (const Road& road : town.roads) {
         roadByEndpoints[normalizedEndpointKey(road.a, road.b)] = road.id;
     }
 
-    int addedToCells = 0;
+    int addedRoads = 0;
     const jcv_site* sites = jcv_diagram_get_sites(&diagram);
     for (int i = 0; i < diagram.numsites; ++i) {
         const jcv_site* site = &sites[i];
-        if (site->index < 0 || site->index >= static_cast<int>(town.cells.size())) {
+        if (site->index < 0) {
             continue;
         }
 
-        Cell& cell = town.cells[static_cast<std::size_t>(site->index)];
         for (const jcv_graphedge* graphEdge = site->edges; graphEdge; graphEdge = graphEdge->next) {
             Vec2 aPx = toVec2(graphEdge->pos[0]);
             Vec2 bPx = toVec2(graphEdge->pos[1]);
@@ -240,27 +229,33 @@ int syncCellBoundaryRoadsFromDiagram(Town& town, const jcv_diagram& diagram, flo
                               units::toUnits(aPx.y, pixelsPerUnit)};
             const Vec2 bUnits{units::toUnits(bPx.x, pixelsPerUnit),
                               units::toUnits(bPx.y, pixelsPerUnit)};
-            const int neighborCell =
-                graphEdge->neighbor ? graphEdge->neighbor->index : -1;
-            const int roadId =
-                findOrCreateBoundaryRoad(town, roadByEndpoints, aUnits, bUnits, site->index,
-                                         neighborCell);
-            if (std::find(cell.roadIds.begin(), cell.roadIds.end(), roadId) == cell.roadIds.end()) {
-                cell.roadIds.push_back(roadId);
-                ++addedToCells;
+            const int before = static_cast<int>(town.roads.size());
+            findOrCreateBoundaryRoad(town, roadByEndpoints, aUnits, bUnits);
+            if (static_cast<int>(town.roads.size()) > before) {
+                ++addedRoads;
             }
         }
     }
 
-    return addedToCells;
+    return addedRoads;
 }
 
 }  // namespace
 
 Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain) {
-    const auto start = std::chrono::steady_clock::now();
+    PROFILE_SCOPE(ProfileScopeId::TownBuild);
 
     Town town;
+    const TownConfig townCfg = TownConfig::load(TownConfig::resolveTownPath());
+    town.placementQueueCursor = 0;
+    town.placementBumpIndex   = -1;
+    town.placementBumpCount   = 0;
+    town.placementFailureCount = 0;
+    town.placementFailedIndices.clear();
+    town.suburbanMaxHop = std::max(0, townCfg.initialSuburbanMaxHops);
+    town.urbanCoreMaxHop = -1;
+    town.ringPhase = RingPhase::Normal;
+    town.alleyCompleteRoadIds.clear();
     const float ppu = config.world.pixelsPerUnit;
     const float renderW = config.renderWidth();
     const float renderH = config.renderHeight();
@@ -282,17 +277,6 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain) {
 
     jcv_diagram diagram{};
     jcv_diagram_generate(static_cast<int>(sitesPx.size()), sitesPx.data(), &rect, nullptr, &diagram);
-
-    town.cells.resize(static_cast<std::size_t>(diagram.numsites));
-    const jcv_site* jcvSites = jcv_diagram_get_sites(&diagram);
-
-    for (int i = 0; i < diagram.numsites; ++i) {
-        Cell cell;
-        cell.id   = i;
-        cell.site = toUnits(jcvSites[i].p, ppu);
-        cell.centroid = cell.site;
-        town.cells[static_cast<std::size_t>(i)] = std::move(cell);
-    }
 
     std::map<std::pair<int, int>, int> roadIndex;
 
@@ -327,38 +311,20 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain) {
                 road.id = roadId;
                 road.a = {units::toUnits(a.x, ppu), units::toUnits(a.y, ppu)};
                 road.b = {units::toUnits(b.x, ppu), units::toUnits(b.y, ppu)};
-                road.cellA = siteA;
-                road.cellB = siteB;
                 town.roads.push_back(road);
                 roadIndex[key] = roadId;
             }
-
-            addRoadToCell(town.cells[static_cast<std::size_t>(siteA)], roadId);
-            addRoadToCell(town.cells[static_cast<std::size_t>(siteB)], roadId);
         }
 
         edge = jcv_diagram_get_next_edge(edge);
     }
 
-    const int boundaryRoadLinksAdded =
-        syncCellBoundaryRoadsFromDiagram(town, diagram, renderW, renderH, centerPx, radiusPx, ppu);
+    const int boundaryRoadsAdded =
+        syncBoundaryRoadsFromDiagram(town, diagram, renderW, renderH, centerPx, radiusPx, ppu);
 
     jcv_diagram_free(&diagram);
 
     indexJunctions(town);
-    int snapshotBoundaryOk = 0;
-    int snapshotBoundaryFail = 0;
-    rebuildAllCellBoundaries(town, snapshotBoundaryOk, snapshotBoundaryFail);
-
-    std::vector<VoronoiCellSnapshot> voronoiSnapshot;
-    voronoiSnapshot.reserve(town.cells.size());
-    for (const Cell& cell : town.cells) {
-        VoronoiCellSnapshot snapshot;
-        snapshot.id       = cell.id;
-        snapshot.site     = cell.site;
-        snapshot.boundary = cell.boundary;
-        voronoiSnapshot.push_back(std::move(snapshot));
-    }
 
     const int roadsBeforeCorridors = static_cast<int>(town.roads.size());
     if (terrain != nullptr && config.terrain.corridorRoadsEnabled) {
@@ -377,10 +343,6 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain) {
     indexJunctions(town);
     cullVoronoiRoadsParallelToCorridors(town, config);
 
-    if (terrain != nullptr) {
-        subdivideCellsFromRoadGraph(town, *terrain, voronoiSnapshot);
-    }
-
     town.primaryRoadCount = 0;
     for (const Road& road : town.roads) {
         if (!road.isSecondary) {
@@ -389,27 +351,19 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain) {
     }
 
     buildRoadMesh(town, config, terrain);
-    assignRoadSideInwards(town);
+    assignRoadSideInwards(town, terrain);
     buildJunctionMesh(town, ppu, 1.f);
-    buildCellCentroidMesh(town, ppu, 1.f);
-    buildCellSiteMesh(town, ppu, 1.f);
     buildRoadEndProbeMesh(town, ppu, config.plots.frontageSetback);
 
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start);
     Logger::log("voronoi", "scale=" + std::to_string(config.voronoi.scale) + " seed="
-                                + std::to_string(config.voronoi.seed) + " cells="
-                                + std::to_string(town.cells.size()) + " roads="
-                                + std::to_string(town.roads.size()) + " boundary_road_links="
-                                + std::to_string(boundaryRoadLinksAdded) + " junctions="
-                                + std::to_string(town.junctions.size()) + " snapshot_boundary_ok="
-                                + std::to_string(snapshotBoundaryOk) + " snapshot_boundary_fail="
-                                + std::to_string(snapshotBoundaryFail) + " roads_before_corridors="
+                                + std::to_string(config.voronoi.seed) + " roads="
+                                + std::to_string(town.roads.size()) + " boundary_roads_added="
+                                + std::to_string(boundaryRoadsAdded) + " junctions="
+                                + std::to_string(town.junctions.size()) + " roads_before_corridors="
                                 + std::to_string(roadsBeforeCorridors) + " roads_after_corridors="
                                 + std::to_string(roadsAfterCorridors) + " roads_after_split="
                                 + std::to_string(roadsAfterSplit) + " primary_roads="
-                                + std::to_string(town.primaryRoadCount) + " boundary_source=faces"
-                                + " time_ms=" + std::to_string(elapsed.count()));
+                                + std::to_string(town.primaryRoadCount) + " boundary_source=roads");
 
     return town;
 }

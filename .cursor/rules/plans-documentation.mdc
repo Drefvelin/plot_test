@@ -13,7 +13,7 @@ Design docs live in [`plans/`](plans/README.md). Update them in the **same chang
 |--------|--------|
 | Terrain Step 1 work (overlay, bake, debug, visual road clip) | `plans/terrain-step1-implementation.md`, status in `plans/terrain-roadmap.md` |
 | Terrain bake, atlas, queries, config | `plans/terrain-*.md`, status in `plans/terrain-roadmap.md` |
-| Building placement, zones, gap-fill, alleys | `plans/terrain-placement.md` (if terrain-related); roadmap status table |
+| Building placement, zones, gap-fill, alleys, hop rings | **`plans/placement-model.md`** (authoritative); `plans/terrain-placement.md` for terrain hooks; roadmap status |
 | New building types or `buildings.yml` terrain fields | `plans/terrain-data-model.md`, `plans/terrain-roadmap.md` |
 | Town build pipeline, `Town.h` model | `plans/terrain-data-model.md` if terrain fields added; [`AGENTS.md`](AGENTS.md) for core model |
 | Completed roadmap task | Mark task **Done** in `plans/terrain-roadmap.md` and summary in `plans/README.md` |
@@ -28,6 +28,7 @@ Design docs live in [`plans/`](plans/README.md). Update them in the **same chang
 ## Doc map
 
 - `plans/README.md` — index and high-level status
+- **`plans/placement-model.md`** — authoritative placement rules (plots, zones, alleys, gap-fill)
 - `plans/terrain-system.md` — goals and architecture
 - `plans/terrain-data-model.md` — structs, queries, YAML extensions
 - `plans/terrain-bake-pipeline.md` — image → geometry steps

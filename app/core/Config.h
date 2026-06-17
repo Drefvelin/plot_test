@@ -55,12 +55,12 @@ struct LogFileConfig {
 };
 
 struct LoggingConfig {
-    std::string directory = "logs";
+    std::string directory       = "logs";
+    int         flushIntervalMs = 2000;  // 0 = flush only on shutdown / explicit flush()
     std::vector<LogFileConfig> files;
 };
 
 struct DebugConfig {
-    int highlightCellId = -1;  // -1 off, -2 all cells, otherwise a single cell id
     std::array<uint8_t, 3> highlightColor = {128, 128, 128};
 };
 
@@ -84,6 +84,13 @@ struct TerrainConfig {
     float       bridgeSnapSearchRadius    = 0.f;
 };
 
+struct GrowthConfig {
+    int  autoGrow   = 0;
+    int  autoGrowMs = 50;
+    bool autoExit   = false;
+    bool profile    = false;
+};
+
 struct Config {
     WindowConfig  window;
     DiagramConfig diagram;
@@ -95,6 +102,7 @@ struct Config {
     LoggingConfig logging;
     DebugConfig   debug;
     TerrainConfig terrain;
+    GrowthConfig  growth;
 
     std::filesystem::path sourcePath;
 

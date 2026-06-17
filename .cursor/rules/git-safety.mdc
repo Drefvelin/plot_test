@@ -1,0 +1,28 @@
+---
+description: Git safety — never stash or discard uncommitted work without explicit user permission
+alwaysApply: true
+---
+
+# Git safety
+
+## Never run `git stash` without explicit permission
+
+Do **not** run `git stash`, `git stash push`, `git stash pop`, `git stash apply`, or `git stash drop` unless the user explicitly asks in the current message.
+
+Stashing reverts tracked files to `HEAD`. In this repo, most feature work is uncommitted on top of an old `first commit`; stashing silently restores ancient code and breaks the tree.
+
+## If you need a clean tree for comparison
+
+Ask the user first. Safer alternatives:
+
+- `git diff` / `git status` (read-only)
+- a second clone or `git worktree` (with user approval)
+- copy changed files aside (with user approval)
+
+## Other destructive git commands
+
+Same rule: no `git reset --hard`, `git checkout -- .`, `git clean -fd`, or `git restore` on broad paths unless the user explicitly requests it.
+
+## Commits
+
+Only commit when the user asks (see user commit rules). After large recoveries, suggest committing so `HEAD` is not left on stale baseline — do not commit unprompted.

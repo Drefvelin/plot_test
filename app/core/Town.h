@@ -3,8 +3,16 @@
 #include <SFML/Graphics.hpp>
 
 #include <cmath>
+#include <cstdint>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+enum class RingPhase {
+    Normal,
+    DensifyCore,
+};
 
 struct TerrainAtlas;
 
@@ -30,8 +38,7 @@ struct Vec2 {
 
 inline Vec2 perpendicular(const Vec2& v) { return {-v.y, v.x}; }
 
-// Shared boundary segment between two cells. Geometry is stored in world units.
-// Available frontage span on one side of a road (one Voronoi cell).
+// Available frontage span on one side of a road.
 struct RoadFrontageSegment {
     int   id         = -1;
     float startT     = 0.f;
@@ -41,31 +48,76 @@ struct RoadFrontageSegment {
     float width() const { return endT - startT; }
 };
 
+struct RoadWallSpan {
+    float tMin = 0.f;
+    float tMax = 0.f;
+
+    float width() const { return tMax - tMin; }
+};
+
+struct BankWallSpanCache {
+    std::uint32_t              wallSpanInstanceGen = 0;
+    std::uint32_t              wallSpanTopologyGen = 0;
+    Vec2                       origin{};
+    Vec2                       edgeDir{};
+    float                      roadLen = 0.f;
+    std::vector<RoadWallSpan>  occupiedSpans;
+};
+
+struct DepthCacheKey {
+    float t        = 0.f;
+    float frontage = 0.f;
+    float setback  = 0.f;
+
+    bool operator==(const DepthCacheKey& rhs) const {
+        return t == rhs.t && frontage == rhs.frontage && setback == rhs.setback;
+    }
+};
+
+struct DepthCacheKeyHash {
+    std::size_t operator()(const DepthCacheKey& key) const noexcept {
+        std::size_t h = 0;
+        const auto*   bytes = reinterpret_cast<const unsigned char*>(&key.t);
+        for (std::size_t i = 0; i < sizeof(float); ++i) {
+            h = h * 31u + bytes[i];
+        }
+        bytes = reinterpret_cast<const unsigned char*>(&key.frontage);
+        for (std::size_t i = 0; i < sizeof(float); ++i) {
+            h = h * 31u + bytes[i];
+        }
+        bytes = reinterpret_cast<const unsigned char*>(&key.setback);
+        for (std::size_t i = 0; i < sizeof(float); ++i) {
+            h = h * 31u + bytes[i];
+        }
+        return h;
+    }
+};
+
 struct RoadSideFrontage {
-    int                              cellId = -1;
-    Vec2                             inward{};  // perpendicular into cell, from edge probe
+    Vec2                             inward{};
     std::vector<RoadFrontageSegment> segments;
+    std::uint8_t                     exhausted = 0;
+    mutable std::uint32_t              depthCacheTopologyGen = 0;
+    mutable std::unordered_map<DepthCacheKey, float, DepthCacheKeyHash> depthCacheEntries;
+    mutable BankWallSpanCache          wallSpans;
 };
 
 struct Road {
     int   id     = -1;
     Vec2  a;
     Vec2  b;
-    int   cellA  = -1;
-    int   cellB  = -1;
     bool  isSecondary       = false;
     bool  isTerrainCorridor = false;
     bool  isBridge          = false;
     int   addedAtQueueIndex = -1;
-    int   hostCellId        = -1;
+    int   hostRoadId        = -1;
+    int   hostBankIndex     = -1;
+    int   junctionA         = -1;
+    int   junctionB         = -1;
     RoadSideFrontage sideA;
     RoadSideFrontage sideB;
 
     float length() const { return (b - a).length(); }
-
-    bool isSameCellSecondary() const {
-        return isSecondary && cellA >= 0 && cellA == cellB;
-    }
 
     RoadSideFrontage* sideBank(int bankIndex) {
         return bankIndex == 1 ? &sideB : &sideA;
@@ -74,65 +126,34 @@ struct Road {
     const RoadSideFrontage* sideBank(int bankIndex) const {
         return bankIndex == 1 ? &sideB : &sideA;
     }
+};
 
-    RoadSideFrontage* sideForCell(int cellId) {
-        if (cellId == cellA) {
-            return &sideA;
-        }
-        if (cellId == cellB) {
-            return &sideB;
-        }
-        return nullptr;
-    }
-
-    const RoadSideFrontage* sideForCell(int cellId) const {
-        if (cellId == cellA) {
-            return &sideA;
-        }
-        if (cellId == cellB) {
-            return &sideB;
-        }
-        return nullptr;
-    }
-
-    RoadSideFrontage* sideForPlacement(int cellId, int bankIndex) {
-        if (isSameCellSecondary()) {
-            return sideBank(bankIndex);
-        }
-        return sideForCell(cellId);
-    }
-
-    const RoadSideFrontage* sideForPlacement(int cellId, int bankIndex) const {
-        if (isSameCellSecondary()) {
-            return sideBank(bankIndex);
-        }
-        return sideForCell(cellId);
-    }
+enum class AlleyPlacementKind {
+    Straight,
+    DeadEnd,
+    Turn,
 };
 
 struct SecondaryRoadRecord {
-    Vec2 a{};
-    Vec2 b{};
-    int  hostCellId        = -1;
-    int  addedAtQueueIndex  = -1;
-    bool isThrough          = false;
+    Vec2               a{};
+    Vec2               b{};
+    int                hostRoadId        = -1;
+    int                hostBankIndex     = -1;
+    int                addedAtQueueIndex = -1;
+    bool               isThrough         = false;
+    float              probeAngleDeg     = 0.f;
+    AlleyPlacementKind kind              = AlleyPlacementKind::Straight;
+    float              turnAngleDeg      = 0.f;
 };
 
 struct PendingAlleyFill {
     int addedAtQueueIndex    = -1;
-    int hostCellId           = -1;
+    int hostRoadId           = -1;
     int consecutiveFillFails = 0;
-};
-
-enum class AlleyCellState {
-    Pending,
-    Expanding,
-    Finished,
 };
 
 struct WallGapKey {
     int   roadId    = -1;
-    int   cellId    = -1;
     int   bankIndex = -1;
     float tMin      = 0.f;
     float tMax      = 0.f;
@@ -141,7 +162,6 @@ struct WallGapKey {
 struct WallGapKeyHash {
     std::size_t operator()(const WallGapKey& key) const noexcept {
         std::size_t h = static_cast<std::size_t>(key.roadId);
-        h             = h * 31u + static_cast<std::size_t>(key.cellId);
         h             = h * 31u + static_cast<std::size_t>(key.bankIndex);
         h             = h * 31u + static_cast<std::size_t>(key.tMin * 100.f);
         h             = h * 31u + static_cast<std::size_t>(key.tMax * 100.f);
@@ -151,8 +171,7 @@ struct WallGapKeyHash {
 
 struct WallGapKeyEqual {
     bool operator()(const WallGapKey& lhs, const WallGapKey& rhs) const noexcept {
-        return lhs.roadId == rhs.roadId && lhs.cellId == rhs.cellId
-               && lhs.bankIndex == rhs.bankIndex
+        return lhs.roadId == rhs.roadId && lhs.bankIndex == rhs.bankIndex
                && std::abs(lhs.tMin - rhs.tMin) < 0.05f && std::abs(lhs.tMax - rhs.tMax) < 0.05f;
     }
 };
@@ -173,9 +192,8 @@ struct Junction {
 // Road-facing lot: corners 0–1 on the road (frontage), corners 2–3 inset (depth).
 struct Plot {
     int   id      = -1;
-    int   cellId  = -1;
     int   roadId  = -1;
-    int   roadBank = -1;  // 0/1 for secondary road banks; -1 = use sideForCell
+    int   roadBank = -1;
     Vec2  corners[4] = {};
     float frontage     = 0.f;
     float depth        = 0.f;
@@ -210,22 +228,9 @@ struct BuildingInstance {
     std::string           buildingType;
     BuildingPlacementMode placementMode = BuildingPlacementMode::PlotLot;
     int                   roadId = -1;
-    int                   cellId = -1;
     int                   roadBank = -1;  // 0/1 for secondary road banks
     Plot                  plot;
     std::vector<BuildingFootprint> footprints;
-};
-
-// One Voronoi cell with its bordering roads and subdivided plots.
-struct Cell {
-    int                id = -1;
-    Vec2               site;      // Voronoi generator site
-    Vec2               centroid;  // geometric center of the clipped boundary polygon
-    std::vector<Vec2>  boundary;
-    std::vector<int>   roadIds;
-    std::vector<Plot>  plots;
-    AlleyCellState     alleyState = AlleyCellState::Pending;
-    int                voronoiParentId = -1;
 };
 
 inline Vec2 polygonCentroid(const std::vector<Vec2>& polygon, const Vec2& fallback = {}) {
@@ -265,7 +270,6 @@ struct FrontageSegmentLabel {
 };
 
 struct Town {
-    std::vector<Cell> cells;
     std::vector<Road> roads;
     std::vector<Junction> junctions;
     Vec2              center;
@@ -275,64 +279,68 @@ struct Town {
     int               frontageSegmentIdCounter = 0;
     sf::VertexArray   roadMesh{sf::Triangles};
     sf::VertexArray   junctionMesh{sf::Triangles};
-    sf::VertexArray   cellCentroidMesh{sf::Triangles};
-    sf::VertexArray   cellSiteMesh{sf::Triangles};
     sf::VertexArray   roadEndProbeMesh{sf::Triangles};
     sf::VertexArray   frontageSegmentMesh{sf::Triangles};
     sf::VertexArray   frontageInwardArrowMesh{sf::Triangles};
     std::vector<BuildingInstance> buildingInstances;
+    int               placementQueueCursor = 0;   // next growth-queue index to attempt
+    int               placementBumpIndex   = -1;  // queue index for placementBumpCount
+    int               placementBumpCount     = 0;   // bumps consumed for current index (persists across syncs)
+    int               placementFailureCount = 0;  // skipped slots in [0, active target)
+    std::vector<int>  placementFailedIndices;     // queue indices that failed to place
+    int               suburbanMaxHop = 2;
+    int               urbanCoreMaxHop = -1;
+    RingPhase         ringPhase = RingPhase::Normal;
+    std::unordered_set<int> alleyCompleteRoadIds;
     std::vector<SecondaryRoadRecord> secondaryRoadRecords;
+    float             syncMinPlotFrontage   = 0.f;
+    float             syncMinGapWidth       = 0.f;
+    float             syncMinAlleyGapWidth  = 0.f;
     std::vector<std::vector<AlleyProbeLine>> alleyProbesByQueueIndex;
     std::unordered_set<WallGapKey, WallGapKeyHash, WallGapKeyEqual> checkedAlleyGaps;
-    int                              activeAlleyCellId = -1;
     std::vector<PendingAlleyFill>    pendingAlleyFills;
     int               primaryRoadCount = 0;
     sf::VertexArray   alleyProbeFailMesh{sf::Triangles};
+    sf::VertexArray   hopDebugRoadMesh{sf::Triangles};
+    sf::VertexArray   hopDebugJunctionMesh{sf::Triangles};
     sf::VertexArray   buildingOutlineMesh{sf::Triangles};
     std::vector<FrontageSegmentLabel> plotLabels;
     std::vector<FrontageSegmentLabel> buildingLabels;
     std::vector<FrontageSegmentLabel> frontageSegmentLabels;
-    std::vector<FrontageSegmentLabel> cellCentroidLabels;
     std::vector<FrontageSegmentLabel> roadEndProbeLabels;
 
-    std::size_t plotCount() const;
+    mutable bool              junctionHopCacheValid = false;
+    mutable std::vector<int>  junctionHopCache;
+    mutable std::vector<int>  roadHopCache;
+    mutable int               suburbanRoadListMaxHop = -1;
+    mutable std::vector<int>  suburbanRoadListCache;
+    mutable int               ruralRoadListMaxHop = -1;
+    mutable std::vector<int>  ruralRoadListCache;
+    mutable std::vector<float> ringAvgDistByHop;
+    mutable float              ringMeanSliceWidth = 0.f;
+    mutable float              maxObservedRoadDist = 0.f;
+    std::uint32_t             roadTopologyGeneration = 1;
 };
-
-// Build cell.boundary by chaining this cell's road segments (no Voronoi library).
-void rebuildCellBoundaryFromRoads(Cell& cell, const std::vector<Road>& roads,
-                                   const std::vector<Junction>& junctions);
-void rebuildAllCellBoundaries(Town& town, int& boundaryOk, int& boundaryFail);
-
-// True if p lies inside the cell polygon formed from its roads.
-bool pointInCell(const Vec2& p, const Cell& cell, const std::vector<Road>& roads,
-                 const std::vector<Junction>& junctions = {});
-
-// Uses stored cell.boundary when available (same test as setback probes).
-bool pointInCellBoundary(const Vec2& p, const Cell& cell, const std::vector<Road>& roads);
-
-inline bool pointInCell(const Vec2& p, const Cell& cell, const Town& town) {
-    return pointInCell(p, cell, town.roads, town.junctions);
-}
 
 void indexJunctions(Town& town);
 void buildJunctionMesh(Town& town, float pixelsPerUnit, float radiusUnits = 1.f);
-void buildCellCentroidMesh(Town& town, float pixelsPerUnit, float radiusUnits = 1.f);
-void buildCellSiteMesh(Town& town, float pixelsPerUnit, float radiusUnits = 1.f);
-void assignRoadSideInwards(Town& town);
-void assignSecondaryRoadInwards(Road& road, const Town& town);
+void assignRoadSideInwards(Town& town, const TerrainAtlas* terrain = nullptr);
 void buildSecondaryRoadFrontageSegments(Road& road, Town& town, float frontageSetback);
-void syncAlleyCellStates(Town& town);
 void trimSecondaryRoadRecords(Town& town, int targetCount);
-void rebuildSecondaryRoadsFromRecords(Town& town);
+void rebuildSecondaryRoadsFromRecords(Town& town, const TerrainAtlas* terrain = nullptr);
 void removeSecondaryRoadAtQueueIndex(Town& town, int queueIndex);
 void buildRoadEndProbeMesh(Town& town, float pixelsPerUnit, float probeLengthUnits = 2.f);
 void resetRoadFrontageSegments(Town& town, float frontageSetback);
 void carveRoadFrontageForPlot(Town& town, const Plot& plot, float frontageSetback);
-void carveRoadFrontageForFootprint(Town& town, int roadId, int cellId,
+void carveRoadFrontageForFootprint(Town& town, int roadId, int bankIndex,
                                    const BuildingFootprint& mainFootprint);
-bool validSetbackProbe(const Vec2& roadPoint, const Vec2& inward, float setback, const Cell& cell,
-                       const std::vector<Road>& roads, int excludeRoadId = -1);
+bool pointInsideTownDisc(const Town& town, const Vec2& p);
+bool roadFrameForBank(const Road& road, int bankIndex, Vec2& origin, Vec2& farEnd, Vec2& edgeDir);
 void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,
                      const std::array<uint8_t, 3>& secondaryColor,
                      const std::array<uint8_t, 3>& bridgeColor, float pixelsPerUnit,
                      const TerrainAtlas* terrain, bool clipRoadsAtWater);
+void appendStripedSegment(sf::VertexArray& tris, const Vec2& a, const Vec2& b, float thickness,
+                          const sf::Color& colorA, const sf::Color& colorB, float stripeLength);
+void appendJunctionDisc(sf::VertexArray& mesh, const sf::Vector2f& center, float radiusPx,
+                          const sf::Color& color, int segments = 24);

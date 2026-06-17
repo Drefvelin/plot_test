@@ -42,17 +42,19 @@ add_executable(PlotApp
     app/core/FrontageZones.cpp
     app/core/FrontagePlacement.cpp
     app/core/FrontageGapFill.cpp
+    app/core/GrowthRings.cpp
+    app/core/PlacementFloors.cpp
+    app/core/PlacementPrep.cpp
+    app/core/RoadExhaustion.cpp
     app/core/SecondaryRoadPlacement.cpp
     app/core/BuildingLayout.cpp
     app/core/Hud.cpp
     app/core/Logger.cpp
+    app/core/Profile.cpp
     app/core/Camera.cpp
     app/core/Town.cpp
     app/core/TownBuilder.cpp
     app/core/RoadNetwork.cpp
-    app/core/CellSubdivision.cpp
-    app/core/PlotGenerator.cpp
-    app/core/PlotGeneratorCell.cpp
     app/core/TerrainColors.cpp
     app/core/TerrainBake.cpp
 )

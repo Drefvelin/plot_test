@@ -136,9 +136,6 @@ Config Config::load(const std::filesystem::path& path) {
     }
 
     if (auto d = root["debug"]) {
-        if (d["highlight_cell"]) {
-            config.debug.highlightCellId = d["highlight_cell"].as<int>();
-        }
         config.debug.highlightColor =
             readColor(d["highlight_color"], config.debug.highlightColor);
     }
@@ -200,6 +197,9 @@ Config Config::load(const std::filesystem::path& path) {
 
     if (auto l = root["logging"]) {
         if (l["directory"]) config.logging.directory = l["directory"].as<std::string>();
+        if (l["flush_interval_ms"]) {
+            config.logging.flushIntervalMs = std::max(0, l["flush_interval_ms"].as<int>());
+        }
         if (auto files = l["files"]) {
             for (const auto& entry : files) {
                 LogFileConfig file;
@@ -209,6 +209,21 @@ Config Config::load(const std::filesystem::path& path) {
                     config.logging.files.push_back(file);
                 }
             }
+        }
+    }
+
+    if (auto g = root["growth"]) {
+        if (g["auto_grow"]) {
+            config.growth.autoGrow = std::max(0, g["auto_grow"].as<int>());
+        }
+        if (g["auto_grow_ms"]) {
+            config.growth.autoGrowMs = std::max(0, g["auto_grow_ms"].as<int>());
+        }
+        if (g["auto_exit"]) {
+            config.growth.autoExit = g["auto_exit"].as<bool>();
+        }
+        if (g["profile"]) {
+            config.growth.profile = g["profile"].as<bool>();
         }
     }
 

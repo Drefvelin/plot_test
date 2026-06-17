@@ -4,8 +4,7 @@
 #include <algorithm>
 #include <random>
 
-BuildingGrowthQueue::BuildingGrowthQueue(const TownConfig& townConfig, int seed)
-    : segmentGapFillCount_(std::max(0, townConfig.segmentGapFillCount)) {
+BuildingGrowthQueue::BuildingGrowthQueue(const TownConfig& townConfig, int seed) {
     for (const auto& [buildingType, count] : townConfig.buildingCounts) {
         for (int i = 0; i < count; ++i) {
             queue_.push_back(buildingType);
@@ -32,13 +31,6 @@ std::string BuildingGrowthQueue::nextBuildingType() const {
         return {};
     }
     return queue_[static_cast<std::size_t>(activeCount_)];
-}
-
-bool BuildingGrowthQueue::isSegmentGapFillIndex(int queueIndex) const {
-    if (segmentGapFillCount_ <= 0) {
-        return false;
-    }
-    return queueIndex >= maxBuildings() - segmentGapFillCount_;
 }
 
 bool isGapFillBuildingType(const DefCache& defs, const std::string& buildingType) {

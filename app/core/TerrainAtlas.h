@@ -12,6 +12,7 @@
 enum class TerrainOverlayMode {
     TerrainAndDebug,
     DebugOnly,
+    HopDebug,
     Off,
 };
 

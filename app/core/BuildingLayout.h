@@ -40,6 +40,6 @@ bool layoutBuildingsOnPlot(const Plot& plot, const Town& town,
                            int townSeed, std::vector<BuildingFootprint>& out);
 
 void refreshBuildingDoorEdges(Town& town, const DefCache& defs);
-void assignGapFillDoorEdge(BuildingFootprint& footprint, int roadId, int cellId, const Town& town);
+void assignGapFillDoorEdge(BuildingFootprint& footprint, int roadId, int bankIndex, const Town& town);
 void removeSecondariesOverlappingMain(Town& town, const BuildingFootprint& newMain, int sourcePlotId);
 void appendBuildingFootprintOutlines(Town& town, float pixelsPerUnit);

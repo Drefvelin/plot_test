@@ -101,7 +101,7 @@ PlotDimensions computePlotDimensionsAtArea(const SizeBand& band, float area, flo
     }
 
     if (depth > availableDepth + 1e-3f) {
-        return fail(DimReject::DepthExceedsCell);
+        return fail(DimReject::DepthExceedsRoadHit);
     }
     if (!aspectRatioOk(frontage, depth, maxDepthToFrontRatio)) {
         return fail(DimReject::DepthRatioExceeded);
@@ -189,8 +189,9 @@ PlotDimensions computePlotDimensions(const DefCache& defs, const std::string& bu
 PlotDimensions computePlotDimensionsForRoad(const DefCache& defs, const std::string& buildingType,
                                             float targetArea, PlotOrientation orient,
                                             const Vec2& roadStart, const Vec2& edgeDir,
-                                            float maxFrontage, const Vec2& inward, const Cell& cell,
-                                            float maxDepthToFrontRatio, float frontageSetback,
+                                            float maxFrontage, const Vec2& inward, int hostRoadId,
+                                            int bankIndex, Town& town, float maxDepthToFrontRatio,
+                                            float frontageSetback,
                                             DimReject* rejectOut, const SizeBand* plotAreaBand) {
     const SizeBand* band = plotAreaBand ? plotAreaBand : defs.sizeBandForBuilding(buildingType);
     if (!band) {
@@ -202,8 +203,8 @@ PlotDimensions computePlotDimensionsForRoad(const DefCache& defs, const std::str
     }
 
     const float probeFront = std::min(maxFrontage, std::sqrt(band->maxArea));
-    const float depthCap   = maxPlotDepthInCell(roadStart, edgeDir, probeFront, inward,
-                                                frontageSetback, cell);
+    const float depthCap   = maxPlotDepthToRoadHit(roadStart, edgeDir, probeFront, inward,
+                                                   frontageSetback, hostRoadId, bankIndex, town);
     PlotDimensions dims =
         fitPlotDimensions(defs, buildingType, targetArea, depthCap, maxFrontage,
                           maxDepthToFrontRatio, orient, rejectOut, plotAreaBand);
@@ -211,8 +212,9 @@ PlotDimensions computePlotDimensionsForRoad(const DefCache& defs, const std::str
         return dims;
     }
 
-    const float actualDepthCap = maxPlotDepthInCell(roadStart, edgeDir, dims.frontage, inward,
-                                                    frontageSetback, cell);
+    const float actualDepthCap = maxPlotDepthToRoadHit(roadStart, edgeDir, dims.frontage, inward,
+                                                       frontageSetback, hostRoadId, bankIndex,
+                                                       town);
     return fitPlotDimensions(defs, buildingType, targetArea, actualDepthCap, maxFrontage,
                              maxDepthToFrontRatio, orient, rejectOut, plotAreaBand);
 }
@@ -229,8 +231,8 @@ const char* rejectName(DimReject reason) {
         return "depth_ratio";
     case DimReject::AreaOutOfBand:
         return "area_out_of_band";
-    case DimReject::DepthExceedsCell:
-        return "depth_exceeds_cell";
+    case DimReject::DepthExceedsRoadHit:
+        return "depth_exceeds_road_hit";
     default:
         return "ok";
     }

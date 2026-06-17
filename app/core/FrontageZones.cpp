@@ -2,6 +2,7 @@
 
 #include "FrontagePlacement.h"
 #include "PlotGeometry.h"
+#include "Profile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,21 +17,116 @@ constexpr float kRuralMinBuildingSepGrowth = 50.f;
 
 namespace {
 
-int findJunctionAt(const Vec2& p, const std::vector<Junction>& junctions, float eps = 0.08f) {
-    for (std::size_t i = 0; i < junctions.size(); ++i) {
-        if ((junctions[static_cast<std::size_t>(i)].pos - p).length() <= eps) {
-            return static_cast<int>(i);
-        }
+int segmentMinJunctionHopsImpl(const Town& town, int roadId, const std::vector<int>& junctionHops) {
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return 999;
     }
-    return -1;
+    const Road& road = town.roads[static_cast<std::size_t>(roadId)];
+
+    int hops = 999;
+    if (road.junctionA >= 0 && road.junctionA < static_cast<int>(junctionHops.size())
+        && junctionHops[static_cast<std::size_t>(road.junctionA)] >= 0) {
+        hops = std::min(hops, junctionHops[static_cast<std::size_t>(road.junctionA)]);
+    }
+    if (road.junctionB >= 0 && road.junctionB < static_cast<int>(junctionHops.size())
+        && junctionHops[static_cast<std::size_t>(road.junctionB)] >= 0) {
+        hops = std::min(hops, junctionHops[static_cast<std::size_t>(road.junctionB)]);
+    }
+    return hops;
 }
 
-}  // namespace
+void rebuildRingDistanceStats(Town& town) {
+    int maxHop = 0;
+    for (const int hops : town.junctionHopCache) {
+        if (hops >= 0) {
+            maxHop = std::max(maxHop, hops);
+        }
+    }
+    for (const int hops : town.roadHopCache) {
+        if (hops >= 0 && hops < 999) {
+            maxHop = std::max(maxHop, hops);
+        }
+    }
 
-std::vector<int> computeJunctionHopDistances(const Town& town) {
-    std::vector<int> hops(town.junctions.size(), -1);
+    std::vector<std::vector<float>> buckets(static_cast<std::size_t>(maxHop + 1));
+    for (std::size_t ji = 0; ji < town.junctions.size(); ++ji) {
+        const int hops = town.junctionHopCache[ji];
+        if (hops < 0 || hops > maxHop) {
+            continue;
+        }
+        const float dist = (town.junctions[ji].pos - town.center).length();
+        buckets[static_cast<std::size_t>(hops)].push_back(dist);
+    }
+
+    town.maxObservedRoadDist = 0.f;
+    for (const Road& road : town.roads) {
+        if (road.isBridge) {
+            continue;
+        }
+        if (road.id < 0 || road.id >= static_cast<int>(town.roadHopCache.size())) {
+            continue;
+        }
+        const int hops = town.roadHopCache[static_cast<std::size_t>(road.id)];
+        const float dist = roadMidpointCenterDist(town, road);
+        town.maxObservedRoadDist = std::max(town.maxObservedRoadDist, dist);
+        if (hops >= 0 && hops <= maxHop) {
+            buckets[static_cast<std::size_t>(hops)].push_back(dist);
+        }
+    }
+
+    town.ringAvgDistByHop.assign(static_cast<std::size_t>(maxHop + 1), -1.f);
+    for (int h = 0; h <= maxHop; ++h) {
+        const std::vector<float>& samples = buckets[static_cast<std::size_t>(h)];
+        if (samples.empty()) {
+            continue;
+        }
+        float sum = 0.f;
+        for (const float dist : samples) {
+            sum += dist;
+        }
+        town.ringAvgDistByHop[static_cast<std::size_t>(h)] = sum / static_cast<float>(samples.size());
+    }
+
+    float sliceSum   = 0.f;
+    int   sliceCount = 0;
+    for (int h = 0; h < maxHop; ++h) {
+        const float cur = town.ringAvgDistByHop[static_cast<std::size_t>(h)];
+        const float nxt = town.ringAvgDistByHop[static_cast<std::size_t>(h + 1)];
+        if (cur >= 0.f && nxt >= 0.f) {
+            sliceSum += nxt - cur;
+            ++sliceCount;
+        }
+    }
+    town.ringMeanSliceWidth =
+        sliceCount > 0 ? sliceSum / static_cast<float>(sliceCount)
+                       : std::max(town.radius, 1.f) / static_cast<float>(std::max(1, maxHop));
+
+    if (!town.ringAvgDistByHop.empty() && town.ringAvgDistByHop[0] < 0.f) {
+        town.ringAvgDistByHop[0] = 0.f;
+    }
+    for (std::size_t h = 1; h < town.ringAvgDistByHop.size(); ++h) {
+        if (town.ringAvgDistByHop[h] < 0.f) {
+            town.ringAvgDistByHop[h] =
+                town.ringAvgDistByHop[h - 1] + town.ringMeanSliceWidth;
+        }
+    }
+}
+
+void rebuildJunctionHopCache(Town& town) {
+    PROFILE_SCOPE(ProfileScopeId::JunctionHops);
+
+    town.junctionHopCache.assign(town.junctions.size(), -1);
     if (town.junctions.empty()) {
-        return hops;
+        town.roadHopCache.clear();
+        town.junctionHopCacheValid = true;
+        town.ringAvgDistByHop.clear();
+        town.ringMeanSliceWidth    = 0.f;
+        town.maxObservedRoadDist   = 0.f;
+        town.suburbanRoadListMaxHop = -1;
+        town.suburbanRoadListCache.clear();
+        town.ruralRoadListMaxHop = -1;
+        town.ruralRoadListCache.clear();
+        return;
     }
 
     int startJunction = 0;
@@ -44,51 +140,89 @@ std::vector<int> computeJunctionHopDistances(const Town& town) {
     }
 
     std::vector<int> queue;
-    hops[static_cast<std::size_t>(startJunction)] = 0;
+    town.junctionHopCache[static_cast<std::size_t>(startJunction)] = 0;
     queue.push_back(startJunction);
 
     for (std::size_t qi = 0; qi < queue.size(); ++qi) {
-        const int          curJ     = queue[qi];
-        const Junction&    junction = town.junctions[static_cast<std::size_t>(curJ)];
-        const int          curHops  = hops[static_cast<std::size_t>(curJ)];
+        const int       curJ     = queue[qi];
+        const Junction& junction = town.junctions[static_cast<std::size_t>(curJ)];
+        const int       curHops  = town.junctionHopCache[static_cast<std::size_t>(curJ)];
 
         for (const int roadId : junction.roadIds) {
             if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
                 continue;
             }
-            const Road& road = town.roads[static_cast<std::size_t>(roadId)];
-            const int   otherJ =
-                findJunctionAt((junction.pos - road.a).length() <= (junction.pos - road.b).length()
-                                   ? road.b
-                                   : road.a,
-                               town.junctions);
-            if (otherJ < 0 || hops[static_cast<std::size_t>(otherJ)] >= 0) {
+            const Road& road   = town.roads[static_cast<std::size_t>(roadId)];
+            const int   otherJ = (road.junctionA == curJ)   ? road.junctionB
+                                 : (road.junctionB == curJ) ? road.junctionA
+                                                            : -1;
+            if (otherJ < 0 || otherJ >= static_cast<int>(town.junctionHopCache.size())
+                || town.junctionHopCache[static_cast<std::size_t>(otherJ)] >= 0) {
                 continue;
             }
-            hops[static_cast<std::size_t>(otherJ)] = curHops + 1;
+            town.junctionHopCache[static_cast<std::size_t>(otherJ)] = curHops + 1;
             queue.push_back(otherJ);
         }
     }
 
-    return hops;
+    town.roadHopCache.assign(town.roads.size(), 999);
+    for (const Road& road : town.roads) {
+        if (road.id < 0 || road.id >= static_cast<int>(town.roadHopCache.size())) {
+            continue;
+        }
+        town.roadHopCache[static_cast<std::size_t>(road.id)] =
+            segmentMinJunctionHopsImpl(town, road.id, town.junctionHopCache);
+    }
+
+    town.junctionHopCacheValid = true;
+    rebuildRingDistanceStats(town);
+    town.suburbanRoadListMaxHop = -1;
+    town.suburbanRoadListCache.clear();
+    town.ruralRoadListMaxHop = -1;
+    town.ruralRoadListCache.clear();
+}
+
+}  // namespace
+
+float roadMidpointCenterDist(const Town& town, const Road& road) {
+    const Vec2 mid = {(road.a.x + road.b.x) * 0.5f, (road.a.y + road.b.y) * 0.5f};
+    return (mid - town.center).length();
+}
+
+void invalidateJunctionHopCache(Town& town) {
+    town.junctionHopCacheValid = false;
+    town.junctionHopCache.clear();
+    town.roadHopCache.clear();
+    town.ringAvgDistByHop.clear();
+    town.ringMeanSliceWidth  = 0.f;
+    town.maxObservedRoadDist = 0.f;
+    town.suburbanRoadListMaxHop = -1;
+    town.suburbanRoadListCache.clear();
+    town.ruralRoadListMaxHop = -1;
+    town.ruralRoadListCache.clear();
+}
+
+const std::vector<int>& getJunctionHops(const Town& town) {
+    if (!town.junctionHopCacheValid) {
+        rebuildJunctionHopCache(const_cast<Town&>(town));
+    }
+    return town.junctionHopCache;
+}
+
+int getRoadHop(const Town& town, int roadId) {
+    getJunctionHops(town);
+    if (roadId < 0 || roadId >= static_cast<int>(town.roadHopCache.size())) {
+        return 999;
+    }
+    return town.roadHopCache[static_cast<std::size_t>(roadId)];
+}
+
+std::vector<int> computeJunctionHopDistances(const Town& town) {
+    return getJunctionHops(town);
 }
 
 int segmentMinJunctionHops(const Town& town, int roadId, const std::vector<int>& junctionHops) {
-    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
-        return 999;
-    }
-    const Road& road = town.roads[static_cast<std::size_t>(roadId)];
-    const int   ja   = findJunctionAt(road.a, town.junctions);
-    const int   jb   = findJunctionAt(road.b, town.junctions);
-
-    int hops = 999;
-    if (ja >= 0 && ja < static_cast<int>(junctionHops.size()) && junctionHops[static_cast<std::size_t>(ja)] >= 0) {
-        hops = std::min(hops, junctionHops[static_cast<std::size_t>(ja)]);
-    }
-    if (jb >= 0 && jb < static_cast<int>(junctionHops.size()) && junctionHops[static_cast<std::size_t>(jb)] >= 0) {
-        hops = std::min(hops, junctionHops[static_cast<std::size_t>(jb)]);
-    }
-    return hops;
+    return segmentMinJunctionHopsImpl(town, roadId, junctionHops);
 }
 
 float nearestBuildingDist(const Town& town, const Vec2& point) {
@@ -107,7 +241,7 @@ bool segmentMidpoint(const Town& town, const FrontageSlot& slot, Vec2& out) {
     Vec2        origin{};
     Vec2        farEnd{};
     Vec2        edgeDir{};
-    if (!roadFrameForCell(road, slot.cellId, origin, farEnd, edgeDir)) {
+    if (!roadFrameForBank(road, slot.bankIndex, origin, farEnd, edgeDir)) {
         return false;
     }
     out = origin + edgeDir * ((slot.startT + slot.endT) * 0.5f);
@@ -160,15 +294,106 @@ float zoneBiasForType(const char* zone, float townGrowth) {
     return minCenterDistForZone(zone, townGrowth);
 }
 
+int roadHop(const Town& town, int roadId, const std::vector<int>& /*junctionHops*/) {
+    return getRoadHop(town, roadId);
+}
+
+float ringDistAtHop(const Town& town, int hop) {
+    getJunctionHops(town);
+    if (hop < 0) {
+        return 0.f;
+    }
+    if (!town.ringAvgDistByHop.empty()
+        && hop < static_cast<int>(town.ringAvgDistByHop.size())) {
+        return town.ringAvgDistByHop[static_cast<std::size_t>(hop)];
+    }
+    if (town.ringAvgDistByHop.empty()) {
+        return 0.f;
+    }
+    const int lastHop = static_cast<int>(town.ringAvgDistByHop.size()) - 1;
+    return town.ringAvgDistByHop[static_cast<std::size_t>(lastHop)]
+           + static_cast<float>(hop - lastHop) * town.ringMeanSliceWidth;
+}
+
+float suburbanMaxDist(const Town& town) {
+    return ringDistAtHop(town, town.suburbanMaxHop);
+}
+
+float urbanCoreMaxDist(const Town& town) {
+    if (town.urbanCoreMaxHop < 0) {
+        return -1.f;
+    }
+    return ringDistAtHop(town, town.urbanCoreMaxHop);
+}
+
+bool hasRoadOutsideSuburbanBand(const Town& town) {
+    const float suburbanDist = suburbanMaxDist(town);
+    for (const Road& road : town.roads) {
+        if (road.isBridge) {
+            continue;
+        }
+        if (roadMidpointCenterDist(town, road) > suburbanDist + 1e-3f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+PlacementBand classifyPlacementBandByDist(float dist, const Town& town) {
+    if (dist < 0.f) {
+        return PlacementBand::Unknown;
+    }
+    const float suburbanDist = suburbanMaxDist(town);
+    if (dist > suburbanDist + 1e-3f) {
+        return PlacementBand::Rural;
+    }
+    if (town.urbanCoreMaxHop >= 0 && dist <= urbanCoreMaxDist(town) + 1e-3f) {
+        return PlacementBand::Core;
+    }
+    return PlacementBand::Suburban;
+}
+
+sf::Color placementBandColor(PlacementBand band) {
+    switch (band) {
+    case PlacementBand::Core:
+        return sf::Color(220, 70, 70);
+    case PlacementBand::Suburban:
+        return sf::Color(120, 190, 255);
+    case PlacementBand::Rural:
+        return sf::Color(150, 100, 50);
+    default:
+        return sf::Color(100, 100, 100);
+    }
+}
+
+std::string formatPlacementBandDistRanges(const Town& town) {
+    const int suburbanDist = static_cast<int>(std::lround(suburbanMaxDist(town)));
+    std::string out;
+    if (town.urbanCoreMaxHop >= 0) {
+        const int coreDist = static_cast<int>(std::lround(urbanCoreMaxDist(town)));
+        out += "core 0–" + std::to_string(coreDist);
+        if (coreDist < suburbanDist) {
+            out += "  suburban " + std::to_string(coreDist) + "–" + std::to_string(suburbanDist);
+        }
+    } else {
+        out += "suburban 0–" + std::to_string(suburbanDist);
+    }
+    out += "  rural " + std::to_string(suburbanDist) + "+";
+    return out;
+}
+
 float scoreSegmentForZone(const Town& town, const FrontageSlot& slot, const char* zone,
-                          float townGrowth, const std::vector<int>& junctionHops) {
+                          float townGrowth) {
     if (slot.centerDist + 1e-3f < minCenterDistForZone(zone, townGrowth)) {
         return 1e9f;
     }
 
     if (std::strcmp(zone, "rural") == 0) {
-        const int hops = segmentMinJunctionHops(town, slot.roadId, junctionHops);
-        if (hops < minJunctionHopsForRural(townGrowth)) {
+        if (slot.roadId < 0 || slot.roadId >= static_cast<int>(town.roads.size())) {
+            return 1e9f;
+        }
+        const float roadDist = roadMidpointCenterDist(town, town.roads[static_cast<std::size_t>(slot.roadId)]);
+        if (roadDist <= suburbanMaxDist(town) + 1e-3f) {
             return 1e9f;
         }
 
@@ -187,8 +412,9 @@ float scoreSegmentForZone(const Town& town, const FrontageSlot& slot, const char
             return 1e9f;
         }
 
-        const float targetDist    = ruralTargetCenterDist(town, townGrowth);
+        const float targetDist     = ruralTargetCenterDist(town, townGrowth);
         const float distFromTarget = std::abs(slot.centerDist - targetDist);
+        const int   hops           = getRoadHop(town, slot.roadId);
         return distFromTarget - buildingDist * 0.08f - static_cast<float>(hops) * 2.f;
     }
 
@@ -203,4 +429,3 @@ float bandMinFrontage(const DefCache& defs, const std::string& buildingType, flo
     }
     return std::max(1.f, std::sqrt(band->minArea / maxDepthToFrontRatio));
 }
-

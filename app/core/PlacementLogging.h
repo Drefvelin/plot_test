@@ -10,8 +10,8 @@
 #include <unordered_map>
 #include <vector>
 
-struct CellSearchStats {
-    int   cellId        = -1;
+struct RoadSearchStats {
+    int   roadId        = -1;
     float centDist      = 0.f;
     int   roadsChecked  = 0;
     int   dimInvalid    = 0;
@@ -20,7 +20,7 @@ struct CellSearchStats {
     int   dimArea       = 0;
     int   dimDepth      = 0;
     int   dimNoDepth    = 0;
-    int   outsideCell   = 0;
+    int   outsideRoadModel = 0;
     int   overlap       = 0;
     int   valid         = 0;
     float bestValidDist = std::numeric_limits<float>::max();
@@ -40,7 +40,7 @@ struct PlacementSearchLog {
     int         buildingId = -1;
     std::string buildingType;
     int         totalValid = 0;
-    int         chosenCell = -1;
+    int         chosenRoadCandidate = -1;
     int         chosenRoad = -1;
     int         chosenSegment = -1;
     float       chosenDist = 0.f;
@@ -63,13 +63,14 @@ struct PlacementSearchLog {
     int         layoutRequested = 0;
     int         layoutPlaced = 0;
     std::string resultSummary;
-    std::unordered_map<int, CellSearchStats> cells;
+    std::unordered_map<int, RoadSearchStats> roads;
 };
 
 struct FrontageSlot;
 
-CellSearchStats& statsFor(PlacementSearchLog& log, int cellId, float centDist);
-void recordDimReject(CellSearchStats& stats, DimReject reason);
+void resetPlacementSearchLog(PlacementSearchLog& log);
+RoadSearchStats& statsFor(PlacementSearchLog& log, int roadId, float centDist);
+void recordDimReject(RoadSearchStats& stats, DimReject reason);
 void logPlacementDecision(const Town& town, const PlacementSearchLog& log, const PlotConfig& plots,
                           const DefCache& defs);
 void logSegmentInventory(const Town& town);

@@ -18,13 +18,9 @@ public:
     std::vector<std::string> activeBuildings() const;
     std::string nextBuildingType() const;
 
-    bool isSegmentGapFillIndex(int queueIndex) const;
-    int segmentGapFillCount() const { return segmentGapFillCount_; }
-
 private:
     std::vector<std::string> queue_;
-    int                      activeCount_         = 0;
-    int                      segmentGapFillCount_ = 0;
+    int                      activeCount_ = 0;
 };
 
 bool isGapFillBuildingType(const DefCache& defs, const std::string& buildingType);

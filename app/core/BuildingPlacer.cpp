@@ -4,14 +4,23 @@
 #include "BuildingLayout.h"
 #include "FrontageGapFill.h"
 #include "FrontagePlacement.h"
+#include "FrontageZones.h"
+#include "GrowthRings.h"
 #include "Logger.h"
 #include "PlacementLogging.h"
 #include "PlotGeometry.h"
+#include "PlacementPrep.h"
+#include "Profile.h"
+#include "RoadExhaustion.h"
 #include "SecondaryRoadPlacement.h"
 #include "TerrainAtlas.h"
 #include "Units.h"
 
 #include <SFML/Graphics.hpp>
+
+#include <algorithm>
+#include <cstring>
+#include <string>
 
 namespace {
 
@@ -168,9 +177,6 @@ void rebuildFrontageSegmentMesh(Town& town, const PlotConfig& plots, float pixel
     collectAllPrimaryWallGaps(town, minGapWidth, wallGaps);
 
     for (const WallGap& gap : wallGaps) {
-        if (gap.cellId < 0 || gap.cellId >= static_cast<int>(town.cells.size())) {
-            continue;
-        }
         if (gap.inward.length() < 1e-4f) {
             continue;
         }
@@ -287,33 +293,62 @@ bool instanceOnAlleyRoad(const BuildingInstance& instance, int roadId) {
     return false;
 }
 
+const char* placementModeLabel(BuildingPlacementMode mode) {
+    switch (mode) {
+    case BuildingPlacementMode::SegmentGapFill:
+        return "gap_fill";
+    case BuildingPlacementMode::PlotLot:
+        return "plot_lot";
+    default:
+        return "unknown";
+    }
+}
+
+void trimPlacementState(Town& town, int targetCount) {
+    while (!town.buildingInstances.empty()
+           && town.buildingInstances.back().id >= targetCount) {
+        town.buildingInstances.pop_back();
+    }
+    if (town.placementQueueCursor > targetCount) {
+        town.placementQueueCursor = targetCount;
+    }
+    auto& failed = town.placementFailedIndices;
+    failed.erase(std::remove_if(failed.begin(), failed.end(),
+                                [targetCount](int idx) { return idx >= targetCount; }),
+                 failed.end());
+    town.placementFailureCount = static_cast<int>(failed.size());
+}
+
 }  // namespace
 
 void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const DefCache& defs,
                           const PlotConfig& plots, const TownConfig& townCfg, const Config& config,
-                          float pixelsPerUnit, int townSeed, const TerrainAtlas* terrain) {
+                          const PlacementFloors& floors, float pixelsPerUnit, int townSeed,
+                          const TerrainAtlas* terrain, int maxIndicesPerSync) {
+    PROFILE_SCOPE(ProfileScopeId::PlacerSync);
     const int targetCount = queue.activeCount();
 
-    while (static_cast<int>(town.buildingInstances.size()) > targetCount) {
-        town.buildingInstances.pop_back();
-    }
+    trimPlacementState(town, targetCount);
 
     const std::size_t secondaryBefore = town.secondaryRoadRecords.size();
-    trimSecondaryRoadRecords(town, targetCount);
-    if (town.secondaryRoadRecords.size() < secondaryBefore) {
-        town.checkedAlleyGaps.clear();
+    {
+        PROFILE_SCOPE(ProfileScopeId::SecondaryRebuild);
+        trimSecondaryRoadRecords(town, targetCount);
+        if (town.secondaryRoadRecords.size() < secondaryBefore) {
+            town.checkedAlleyGaps.clear();
+        }
+        town.alleyProbesByQueueIndex.assign(static_cast<std::size_t>(targetCount), {});
+        rebuildSecondaryRoadsFromRecords(town, terrain);
+        syncPendingAlleyFills(town, targetCount);
     }
-    syncAlleyCellStates(town);
-    town.alleyProbesByQueueIndex.assign(static_cast<std::size_t>(targetCount), {});
-    rebuildSecondaryRoadsFromRecords(town);
-    syncPendingAlleyFills(town, targetCount);
 
     const auto reapplyFrontageCarves = [&]() {
+        PROFILE_SCOPE(ProfileScopeId::FrontageCarve);
         resetRoadFrontageSegments(town, plots.frontageSetback);
         for (const BuildingInstance& inst : town.buildingInstances) {
             if (inst.placementMode == BuildingPlacementMode::SegmentGapFill) {
                 if (!inst.footprints.empty()) {
-                    carveRoadFrontageForFootprint(town, inst.roadId, inst.cellId,
+                    carveRoadFrontageForFootprint(town, inst.roadId, inst.roadBank,
                                                   inst.footprints[0]);
                 }
             } else {
@@ -323,13 +358,18 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
     };
 
     reapplyFrontageCarves();
+    initRoadExhaustionForSync(town, floors, townCfg);
     logSegmentInventory(town);
+    logRingState(town);
 
     const auto& queueTypes = queue.queue();
-    int                    failed     = 0;
+    int         ringBumps    = 0;
+    int         indicesProcessed = 0;
 
-    while (static_cast<int>(town.buildingInstances.size()) < targetCount) {
-        const int index = static_cast<int>(town.buildingInstances.size());
+    while (town.placementQueueCursor < targetCount) {
+        PROFILE_SCOPE(ProfileScopeId::GrowthLoop);
+        const std::vector<int>& junctionHops = getJunctionHops(town);
+        const int index = town.placementQueueCursor;
         if (index >= static_cast<int>(queueTypes.size())) {
             break;
         }
@@ -339,119 +379,185 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
         instance.buildingType = queueTypes[static_cast<std::size_t>(index)];
 
         PlacementSearchLog searchLog;
-        bool               placed = false;
-        if (queue.isSegmentGapFillIndex(index) && isGapFillBuildingType(defs, instance.buildingType)) {
-            const int   failLimit  = townCfg.alleyFillFailLimit;
-            const float targetArea = samplePlotTargetArea(defs, instance.buildingType, instance.id,
-                                                         townSeed);
+        bool               placed     = false;
+        bool               deferIndex = false;
+        std::string        skipReason = "ring_no_slot";
+        const char*        zone       = zoneTypeForBuilding(defs, instance.buildingType);
+        const bool         isRural    = zone && std::strcmp(zone, "rural") == 0;
+        const bool         fillIn     = isGapFillBuildingType(defs, instance.buildingType);
 
-            const auto tryFillOnAlleyRoad = [&](int roadId) -> bool {
-                if (roadId < 0) {
-                    return false;
-                }
-                return tryPlaceSegmentMain(town, instance.buildingType, defs, plots, instance,
-                                           townSeed, queue.maxBuildings(), searchLog, roadId, true)
-                    || tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance,
-                                        targetArea, townSeed, queue.maxBuildings(), searchLog,
-                                        roadId, true);
-            };
+        RoadAttemptMemo roadMemo;
+        roadMemo.syncContext(town);
+        const PlacementPrep prep =
+            buildPlacementPrep(town, defs, instance.buildingType, index, townSeed,
+                               queue.maxBuildings());
 
-            const auto tryAlleyAddAndFill = [&](int cellId) -> bool {
-                if (cellId < 0) {
-                    return false;
-                }
-                int newRoadIdLocal = -1;
-                tryAddSecondaryRoad(town, index, plots.frontageSetback, townCfg, defs, searchLog,
-                                    newRoadIdLocal, cellId);
-                if (newRoadIdLocal < 0) {
-                    return false;
-                }
-                return tryFillOnAlleyRoad(newRoadIdLocal);
-            };
+        Logger::log("layout",
+                    "ring_attempt: queueIndex=" + std::to_string(index) + " type="
+                        + instance.buildingType + " suburban_max="
+                        + std::to_string(town.suburbanMaxHop) + " urban_core="
+                        + std::to_string(town.urbanCoreMaxHop) + " phase="
+                        + ringPhaseLabel(town.ringPhase));
 
-            int pendingIndex        = -1;
-            int alleyRoadIdForPending = -1;
-
-            if (hasBlockingPendingFills(town, failLimit)) {
-                pendingIndex = frontPendingAlleyIndex(town, failLimit);
-                if (pendingIndex >= 0) {
-                    alleyRoadIdForPending = resolveSecondaryRoadId(
-                        town,
-                        town.pendingAlleyFills[static_cast<std::size_t>(pendingIndex)]
-                            .addedAtQueueIndex);
-                    placed = tryFillOnAlleyRoad(alleyRoadIdForPending);
-                }
-            } else {
-                ensureActiveAlleyCell(town, plots.frontageSetback, townCfg);
-                const int primaryCell = town.activeAlleyCellId;
-                placed                = tryAlleyAddAndFill(primaryCell);
-
-                pendingIndex = pendingAlleyIndexByQueueIndex(town, index);
-                if (pendingIndex >= 0) {
-                    alleyRoadIdForPending = resolveSecondaryRoadId(town, index);
-                }
-
-                if (!placed && primaryCell >= 0
-                    && !hasBlockingPendingFills(town, failLimit)) {
-                    const int secondCell =
-                        pickAlternateAlleyCell(town, plots.frontageSetback, townCfg, primaryCell);
-                    if (secondCell >= 0) {
-                        Logger::log("layout",
-                                    "alley_second_cell: queueIndex=" + std::to_string(index)
-                                        + " primary_cell=" + std::to_string(primaryCell)
-                                        + " second_cell=" + std::to_string(secondCell));
-                        placed = tryAlleyAddAndFill(secondCell);
-                        pendingIndex = pendingAlleyIndexByQueueIndex(town, index);
-                        if (pendingIndex >= 0) {
-                            alleyRoadIdForPending = resolveSecondaryRoadId(town, index);
-                        }
-                    }
-                }
-            }
-
+        if (isRural) {
+            placed = tryPlaceRuralOnRoads(town, instance, defs, plots, townSeed,
+                                          queue.maxBuildings(), searchLog, terrain, junctionHops,
+                                          prep, roadMemo);
             if (!placed) {
-                placed = tryPlaceSegmentMain(town, instance.buildingType, defs, plots, instance,
-                                             townSeed, queue.maxBuildings(), searchLog, -1, true);
-            }
-            if (!placed) {
-                placed = tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance,
-                                          targetArea, townSeed, queue.maxBuildings(), searchLog);
-                if (placed) {
-                    Logger::log("layout",
-                                "plot_fallback: queueIndex=" + std::to_string(index) + " type="
-                                    + instance.buildingType);
-                }
-            }
-
-            if (pendingIndex >= 0 && alleyRoadIdForPending >= 0) {
-                if (placed && instanceOnAlleyRoad(instance, alleyRoadIdForPending)) {
-                    recordAlleyFillSuccess(town, pendingIndex);
-                } else {
-                    recordAlleyFillFailure(town, pendingIndex, failLimit);
-                }
+                skipReason = "rural_out_of_range";
             }
         } else {
-            const float targetArea =
-                samplePlotTargetArea(defs, instance.buildingType, instance.id, townSeed);
-            placed = tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance, targetArea,
-                                      townSeed, queue.maxBuildings(), searchLog);
+            const int failLimit = townCfg.alleyFillFailLimit;
+
+            if (town.placementBumpIndex != index) {
+                town.placementBumpIndex = index;
+                town.placementBumpCount = 0;
+            }
+
+            const auto shouldTryUrbanCore = [&]() {
+                return town.ringPhase == RingPhase::DensifyCore && fillIn
+                       && (hasBlockingPendingFills(town, failLimit)
+                           || !isUrbanCoreSaturated(town, townCfg, defs, junctionHops));
+            };
+
+            if (fillIn) {
+                placed = tryFillBlockingPendingAlleys(
+                    town, instance, defs, plots, townSeed, queue.maxBuildings(), searchLog,
+                    terrain, town.urbanCoreMaxHop, town.suburbanMaxHop, junctionHops, failLimit,
+                    prep, roadMemo);
+            }
+
+            if (!placed && shouldTryUrbanCore()) {
+                placed = tryPlaceInUrbanCore(town, instance, defs, plots, townCfg, townSeed,
+                                             queue.maxBuildings(), searchLog, terrain,
+                                             junctionHops, prep, roadMemo);
+                if (placed && isUrbanCoreSaturated(town, townCfg, defs, junctionHops)) {
+                    town.ringPhase = RingPhase::Normal;
+                }
+            }
+
+            constexpr int kMaxBumpsPerIndex = 32;
+            const int     maxBumpsPerSync =
+                (maxIndicesPerSync > 0) ? 3 : kMaxBumpsPerIndex;
+            int bumpsThisSync = 0;
+
+            while (!placed) {
+                if (fillIn && !placed) {
+                    placed = tryFillBlockingPendingAlleys(
+                        town, instance, defs, plots, townSeed, queue.maxBuildings(), searchLog,
+                        terrain, town.urbanCoreMaxHop, town.suburbanMaxHop, junctionHops,
+                        failLimit, prep, roadMemo);
+                }
+
+                if (!placed) {
+                    placed = tryPlaceSuburbanOnRoads(town, instance, defs, plots, townSeed,
+                                                     queue.maxBuildings(), searchLog, terrain,
+                                                     junctionHops, prep, roadMemo);
+                }
+                if (placed) {
+                    break;
+                }
+
+                getJunctionHops(town);
+                if (!hasRoadOutsideSuburbanBand(town)) {
+                    Logger::log("layout",
+                                "ring_band_cap: queueIndex=" + std::to_string(index)
+                                    + " suburban_max=" + std::to_string(town.suburbanMaxHop)
+                                    + " suburban_dist="
+                                    + std::to_string(static_cast<int>(suburbanMaxDist(town)))
+                                    + " all_roads_in_band no_bump");
+                    break;
+                }
+                if (town.placementBumpCount >= kMaxBumpsPerIndex) {
+                    Logger::log("layout",
+                                "ring_bump_cap: queueIndex=" + std::to_string(index)
+                                    + " bumps=" + std::to_string(town.placementBumpCount)
+                                    + " suburban_max=" + std::to_string(town.suburbanMaxHop));
+                    break;
+                }
+
+                Logger::log("layout",
+                            "ring_band_exhausted: queueIndex=" + std::to_string(index)
+                                + " suburban_max=" + std::to_string(town.suburbanMaxHop)
+                                + " → bump");
+                bumpGrowthRings(town);
+                roadMemo.clearFailures();
+                ++ringBumps;
+                ++town.placementBumpCount;
+                ++bumpsThisSync;
+
+                if (fillIn && !placed) {
+                    placed = tryFillBlockingPendingAlleys(
+                        town, instance, defs, plots, townSeed, queue.maxBuildings(), searchLog,
+                        terrain, town.urbanCoreMaxHop, town.suburbanMaxHop, junctionHops,
+                        failLimit, prep, roadMemo);
+                }
+
+                if (!placed && shouldTryUrbanCore()) {
+                    placed = tryPlaceInUrbanCore(town, instance, defs, plots, townCfg, townSeed,
+                                                 queue.maxBuildings(), searchLog, terrain,
+                                                 junctionHops, prep, roadMemo);
+                    if (placed && isUrbanCoreSaturated(town, townCfg, defs, junctionHops)) {
+                        town.ringPhase = RingPhase::Normal;
+                    }
+                }
+
+                if (!placed && maxIndicesPerSync > 0 && bumpsThisSync >= maxBumpsPerSync) {
+                    deferIndex = true;
+                    break;
+                }
+            }
+
+            if (!placed && !deferIndex) {
+                if (town.ringPhase == RingPhase::DensifyCore && fillIn) {
+                    skipReason = "urban_core_exhausted";
+                    if (isUrbanCoreSaturated(town, townCfg, defs, junctionHops)) {
+                        town.ringPhase = RingPhase::Normal;
+                    }
+                } else {
+                    skipReason = "ring_no_slot";
+                }
+            }
+        }
+
+        if (deferIndex) {
+            break;
         }
 
         if (!placed) {
             logPlacementDecision(town, searchLog, plots, defs);
-            if (queue.isSegmentGapFillIndex(index)
-                && isGapFillBuildingType(defs, instance.buildingType)) {
-                Logger::log("layout",
-                            "placement_exhausted: queueIndex=" + std::to_string(index) + " type="
-                                + instance.buildingType
-                                + " (alley fill, second cell, gap fill, and plot fallback all failed)");
+            Logger::log("layout",
+                        "placement_skipped: queueIndex=" + std::to_string(index) + " type="
+                            + instance.buildingType + " reason=" + skipReason + " suburban_max="
+                            + std::to_string(town.suburbanMaxHop) + " urban_core="
+                            + std::to_string(town.urbanCoreMaxHop));
+            town.placementFailedIndices.push_back(index);
+            town.placementFailureCount = static_cast<int>(town.placementFailedIndices.size());
+        } else {
+            logPlacementDecision(town, searchLog, plots, defs);
+            town.buildingInstances.push_back(instance);
+            if (instance.placementMode == BuildingPlacementMode::SegmentGapFill) {
+                invalidateWallSpanCacheForBank(town, instance.roadId, instance.roadBank);
+            } else {
+                invalidateWallSpanCacheForBank(town, instance.plot.roadId, instance.plot.roadBank);
             }
-            ++failed;
-            break;
         }
 
-        logPlacementDecision(town, searchLog, plots, defs);
-        town.buildingInstances.push_back(instance);
+        ++town.placementQueueCursor;
+        ++indicesProcessed;
+        if (maxIndicesPerSync > 0 && indicesProcessed >= maxIndicesPerSync) {
+            break;
+        }
+    }
+
+    if (town.placementQueueCursor >= targetCount) {
+        Logger::log("layout",
+                    "ring_summary: target=" + std::to_string(targetCount) + " placed="
+                        + std::to_string(town.buildingInstances.size()) + " failures="
+                        + std::to_string(town.placementFailureCount) + " bumps="
+                        + std::to_string(ringBumps) + " final_suburban_max="
+                        + std::to_string(town.suburbanMaxHop) + " final_urban_core="
+                        + std::to_string(town.urbanCoreMaxHop));
     }
 
     if (removeAlleysThroughSecondaryBuildings(town)) {
@@ -459,23 +565,25 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
         reapplyFrontageCarves();
     }
 
-    rebuildOutlineMesh(town, defs, pixelsPerUnit, townSeed);
-    rebuildFrontageSegmentMesh(town, plots, pixelsPerUnit);
-    int probeDisplayIndex = static_cast<int>(town.buildingInstances.size());
-    if (probeDisplayIndex >= targetCount && targetCount > 0) {
-        probeDisplayIndex = targetCount - 1;
+    {
+        PROFILE_SCOPE(ProfileScopeId::MeshRebuild);
+        rebuildOutlineMesh(town, defs, pixelsPerUnit, townSeed);
+        rebuildFrontageSegmentMesh(town, plots, pixelsPerUnit);
+        int probeDisplayIndex = -1;
+        if (town.urbanCoreMaxHop >= 0 && town.placementQueueCursor > 0) {
+            probeDisplayIndex = town.placementQueueCursor - 1;
+            if (probeDisplayIndex >= targetCount && targetCount > 0) {
+                probeDisplayIndex = targetCount - 1;
+            }
+        }
+        rebuildAlleyProbeMesh(town, probeDisplayIndex, pixelsPerUnit);
+        rebuildRoadMesh(town, config.colors.edges, config.colors.secondaryEdges,
+                        config.colors.bridge, pixelsPerUnit, terrain, config.terrain.clipRoadsAtWater);
+        rebuildHopDebugRoadMesh(town, getJunctionHops(town), pixelsPerUnit);
+        rebuildHopDebugJunctionMesh(town, getJunctionHops(town), pixelsPerUnit, 1.f);
+        indexJunctions(town);
+        buildJunctionMesh(town, config.world.pixelsPerUnit, 1.f);
     }
-    if (probeDisplayIndex < 0
-        || !queue.isSegmentGapFillIndex(probeDisplayIndex)
-        || probeDisplayIndex >= static_cast<int>(queue.queue().size())
-        || !isGapFillBuildingType(defs, queue.queue()[static_cast<std::size_t>(probeDisplayIndex)])) {
-        probeDisplayIndex = -1;
-    }
-    rebuildAlleyProbeMesh(town, probeDisplayIndex, pixelsPerUnit);
-    rebuildRoadMesh(town, config.colors.edges, config.colors.secondaryEdges, config.colors.bridge,
-                    pixelsPerUnit, terrain, config.terrain.clipRoadsAtWater);
-    indexJunctions(town);
-    buildJunctionMesh(town, config.world.pixelsPerUnit, 1.f);
 
     int gapFillCount = 0;
     int secondaryRoadCount = 0;
@@ -490,8 +598,10 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
         }
     }
 
-    Logger::log("render", "building instances=" + std::to_string(town.buildingInstances.size()) + "/"
-                               + std::to_string(targetCount) + " gap_fill=" + std::to_string(gapFillCount)
-                               + " secondary_roads=" + std::to_string(secondaryRoadCount)
-                               + (failed > 0 ? " failed=" + std::to_string(failed) : ""));
+    Logger::log("render",
+                "placed=" + std::to_string(town.buildingInstances.size()) + " target="
+                    + std::to_string(targetCount) + " failures="
+                    + std::to_string(town.placementFailureCount) + " gap_fill="
+                    + std::to_string(gapFillCount) + " secondary_roads="
+                    + std::to_string(secondaryRoadCount));
 }

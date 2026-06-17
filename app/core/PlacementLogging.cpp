@@ -8,36 +8,34 @@
 
 #include <algorithm>
 
-CellSearchStats& statsFor(PlacementSearchLog& log, int cellId, float centDist) {
-    auto it = log.cells.find(cellId);
-    if (it == log.cells.end()) {
-        CellSearchStats stats;
-        stats.cellId   = cellId;
+void resetPlacementSearchLog(PlacementSearchLog& log) {
+    log.totalValid            = 0;
+    log.chosenRoadCandidate   = -1;
+    log.chosenRoad            = -1;
+    log.chosenSegment         = -1;
+    log.slotsExamined         = 0;
+    log.zoneFiltered          = 0;
+    log.noInwardSkipped       = 0;
+    log.orientFailedSkipped   = 0;
+    log.dimFailedSegments     = 0;
+    log.layoutRequested       = 0;
+    log.layoutPlaced          = 0;
+    log.resultSummary.clear();
+    log.roads.clear();
+}
+
+RoadSearchStats& statsFor(PlacementSearchLog& log, int roadId, float centDist) {
+    auto it = log.roads.find(roadId);
+    if (it == log.roads.end()) {
+        RoadSearchStats stats;
+        stats.roadId   = roadId;
         stats.centDist = centDist;
-        it             = log.cells.emplace(cellId, stats).first;
+        it             = log.roads.emplace(roadId, stats).first;
     }
     return it->second;
 }
 
-void recordRoadProbe(CellSearchStats& stats, int roadId, float roadLen, float depthCap,
-                     DimReject reject, const Vec2& roadPoint, const Vec2& inward, float setback,
-                     const Cell& cell) {
-    for (const CellSearchStats::RoadProbe& probe : stats.roadProbes) {
-        if (probe.roadId == roadId) {
-            return;
-        }
-    }
-    if (stats.roadProbes.size() >= 4) {
-        return;
-    }
-    const Vec2 alt = inward * -1.f;
-    stats.roadProbes.push_back(
-        {roadId, roadLen, depthCap, reject,
-         pointInPolygon(roadPoint + inward * setback, cell.boundary),
-         pointInPolygon(roadPoint + alt * setback, cell.boundary)});
-}
-
-void recordDimReject(CellSearchStats& stats, DimReject reason) {
+void recordDimReject(RoadSearchStats& stats, DimReject reason) {
     ++stats.dimInvalid;
     switch (reason) {
     case DimReject::RoadTooShort:
@@ -49,7 +47,7 @@ void recordDimReject(CellSearchStats& stats, DimReject reason) {
     case DimReject::AreaOutOfBand:
         ++stats.dimArea;
         break;
-    case DimReject::DepthExceedsCell:
+    case DimReject::DepthExceedsRoadHit:
         ++stats.dimDepth;
         break;
     case DimReject::InvalidInput:
@@ -89,7 +87,7 @@ void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
         Logger::log("placement", needsLog);
     }
 
-    if (log.chosenCell < 0) {
+    if (log.chosenRoadCandidate < 0) {
         Logger::log("placement", "result: FAILED " + log.resultSummary);
         Logger::log("placement", "failure_detail: slots_examined=" + std::to_string(log.slotsExamined)
                                  + " zone_filtered=" + std::to_string(log.zoneFiltered)
@@ -102,7 +100,7 @@ void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
 
     Logger::log("placement", "result: PLACED " + log.resultSummary);
     Logger::log("placement",
-                "chosen: cell=" + std::to_string(log.chosenCell) + " road="
+                "chosen: road_candidate=" + std::to_string(log.chosenRoadCandidate) + " road="
                     + std::to_string(log.chosenRoad) + " segment="
                     + std::to_string(log.chosenSegment) + " plot_center=("
                     + fmt1(log.chosenCenter.x) + "," + fmt1(log.chosenCenter.y)
@@ -111,12 +109,6 @@ void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
                     + fmt1(log.chosenArea) + " depth/front="
                     + fmt1(log.chosenDepth / std::max(log.chosenFrontage, 1e-3f)) + " orientation="
                     + orientationName(log.chosenOrient));
-    const Cell& chosenCellRef = town.cells[static_cast<std::size_t>(log.chosenCell)];
-    Logger::log("placement", "cell_centroid=(" + fmt1(chosenCellRef.centroid.x) + ","
-                             + fmt1(chosenCellRef.centroid.y) + ") cent_dist="
-                             + fmt1((chosenCellRef.centroid - town.center).length())
-                             + " voronoi_site=(" + fmt1(chosenCellRef.site.x) + ","
-                             + fmt1(chosenCellRef.site.y) + ")");
     std::string searchDetails = "search: valid_candidates=" + std::to_string(log.totalValid)
                                 + " zone=" + log.zoneType + " growth=" + fmt1(log.townGrowth)
                                 + " min_center_dist=" + fmt1(log.zoneBias);
@@ -136,73 +128,73 @@ void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
                                         : ""));
     }
 
-    std::vector<const CellSearchStats*> closerBlocked;
-    closerBlocked.reserve(log.cells.size());
-    for (const auto& [_, stats] : log.cells) {
+    std::vector<const RoadSearchStats*> closerBlocked;
+    closerBlocked.reserve(log.roads.size());
+    for (const auto& [_, stats] : log.roads) {
         if (stats.centDist + 1e-3f < log.chosenDist && stats.valid == 0 && stats.roadsChecked > 0) {
             closerBlocked.push_back(&stats);
         }
     }
     std::sort(closerBlocked.begin(), closerBlocked.end(),
-              [](const CellSearchStats* a, const CellSearchStats* b) {
+              [](const RoadSearchStats* a, const RoadSearchStats* b) {
                   return a->centDist < b->centDist;
               });
 
     if (closerBlocked.empty()) {
         Logger::log("placement",
-                    "closer_cells: none with site closer than chosen plot; nearest cells likely "
-                    "could not fit this building type under ratio/road/area constraints");
+                    "closer_roads: none closer than chosen plot; nearer segments likely could not "
+                    "fit this building type under ratio/road/area constraints");
     } else {
-        Logger::log("placement", "closer_cells_blocked: count=" + std::to_string(closerBlocked.size())
-                                 + " (cell centroid nearer than chosen plot but zero valid placements)");
+        Logger::log("placement", "closer_roads_blocked: count=" + std::to_string(closerBlocked.size())
+                                 + " (road segment nearer than chosen plot but zero valid placements)");
         const std::size_t limit = std::min<std::size_t>(closerBlocked.size(), 8);
         for (std::size_t i = 0; i < limit; ++i) {
-            const CellSearchStats& s = *closerBlocked[i];
+            const RoadSearchStats& s = *closerBlocked[i];
             Logger::log("placement",
-                        "  cell=" + std::to_string(s.cellId) + " cent_dist="
+                        "  road_candidate=" + std::to_string(s.roadId) + " center_dist="
                             + fmt1(s.centDist) + " roads=" + std::to_string(s.roadsChecked)
                             + " dim_fail=" + std::to_string(s.dimInvalid) + " (road_short="
                             + std::to_string(s.dimRoadShort) + " ratio="
                             + std::to_string(s.dimRatio) + " area=" + std::to_string(s.dimArea)
                             + " depth=" + std::to_string(s.dimDepth) + " no_depth="
-                            + std::to_string(s.dimNoDepth) + ") outside_cell="
-                            + std::to_string(s.outsideCell) + " overlap="
+                            + std::to_string(s.dimNoDepth) + ") outside_road_model="
+                            + std::to_string(s.outsideRoadModel) + " overlap="
                             + std::to_string(s.overlap));
         }
         if (closerBlocked.size() > limit) {
             Logger::log("placement", "  ... " + std::to_string(closerBlocked.size() - limit)
-                                     + " more blocked closer cells omitted");
+                                     + " more blocked closer roads omitted");
         }
     }
 
-    std::vector<const CellSearchStats*> closerButWorse;
-    for (const auto& [_, stats] : log.cells) {
+    std::vector<const RoadSearchStats*> closerButWorse;
+    for (const auto& [_, stats] : log.roads) {
         if (stats.valid > 0 && stats.bestValidDist > log.chosenDist + 1e-3f
             && stats.centDist + 1e-3f < log.chosenDist) {
             closerButWorse.push_back(&stats);
         }
     }
     std::sort(closerButWorse.begin(), closerButWorse.end(),
-              [](const CellSearchStats* a, const CellSearchStats* b) {
+              [](const RoadSearchStats* a, const RoadSearchStats* b) {
                   return a->centDist < b->centDist;
               });
     if (!closerButWorse.empty()) {
-        Logger::log("placement", "closer_cells_with_worse_plots: count="
+        Logger::log("placement", "closer_roads_with_worse_plots: count="
                                  + std::to_string(closerButWorse.size())
                                  + " (could place here but plot_center was farther than chosen)");
         const std::size_t limit = std::min<std::size_t>(closerButWorse.size(), 4);
         for (std::size_t i = 0; i < limit; ++i) {
-            const CellSearchStats& s = *closerButWorse[i];
-            Logger::log("placement", "  cell=" + std::to_string(s.cellId) + " cent_dist="
+            const RoadSearchStats& s = *closerButWorse[i];
+            Logger::log("placement", "  road_candidate=" + std::to_string(s.roadId) + " center_dist="
                                      + fmt1(s.centDist) + " best_plot_dist="
                                      + fmt1(s.bestValidDist) + " vs chosen="
                                      + fmt1(log.chosenDist));
         }
     }
 
-    if (!log.cells.empty()) {
-        const CellSearchStats* nearest = nullptr;
-        for (const auto& [_, stats] : log.cells) {
+    if (!log.roads.empty()) {
+        const RoadSearchStats* nearest = nullptr;
+        for (const auto& [_, stats] : log.roads) {
             if (!nearest || stats.centDist < nearest->centDist) {
                 nearest = &stats;
             }
@@ -216,17 +208,17 @@ void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
                 primary = "depth_ratio (need wider road frontage for this building size)";
             } else if (nearest->dimRoadShort > 0) {
                 primary = "road_too_short for minimum area";
-            } else if (nearest->outsideCell > nearest->dimInvalid) {
-                primary = "outside_cell (plot corners left polygon)";
+            } else if (nearest->outsideRoadModel > nearest->dimInvalid) {
+                primary = "outside_road_model (plot failed road-only validation)";
             } else if (nearest->overlap > 0) {
                 primary = "overlap with existing buildings";
             }
 
             Logger::log("placement",
-                        "nearest_cell cell=" + std::to_string(nearest->cellId) + " cent_dist="
+                        "nearest_road_candidate road=" + std::to_string(nearest->roadId) + " center_dist="
                             + fmt1(nearest->centDist) + " had zero valid plots; primary_blocker="
                             + primary);
-            for (const CellSearchStats::RoadProbe& probe : nearest->roadProbes) {
+            for (const RoadSearchStats::RoadProbe& probe : nearest->roadProbes) {
                 Logger::log("placement",
                             "  road=" + std::to_string(probe.roadId) + " len="
                                 + fmt1(probe.roadLen) + " depth_cap=" + fmt1(probe.depthCap)
@@ -237,14 +229,14 @@ void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
         }
 
         float closestValidDist = std::numeric_limits<float>::max();
-        for (const auto& [_, stats] : log.cells) {
+        for (const auto& [_, stats] : log.roads) {
             if (stats.valid > 0) {
                 closestValidDist = std::min(closestValidDist, stats.bestValidDist);
             }
         }
         if (closestValidDist < std::numeric_limits<float>::max() - 1.f) {
             Logger::log("placement", "closest_valid_plot_dist=" + fmt1(closestValidDist)
-                                     + " (global minimum among all cells with any valid slot)");
+                                     + " (global minimum among all roads with any valid slot)");
         }
     }
 }
@@ -257,11 +249,12 @@ void logSegmentInventory(const Town& town) {
     Logger::log("segments", "=== frontage segments after carve: count=" + std::to_string(count)
                                 + " ===");
     for (const Road& road : town.roads) {
-        for (const RoadSideFrontage* side : {&road.sideA, &road.sideB}) {
+        for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
+            const RoadSideFrontage* side = road.sideBank(bankIndex);
             for (const RoadFrontageSegment& segment : side->segments) {
                 Logger::log("segments", "segment seg=" + std::to_string(segment.id) + " road="
-                                            + std::to_string(road.id) + " cell="
-                                            + std::to_string(side->cellId) + " width="
+                                            + std::to_string(road.id) + " bank="
+                                            + std::to_string(bankIndex) + " width="
                                             + fmt1(segment.width()) + " center_dist="
                                             + fmt1(segment.centerDist));
             }
@@ -274,7 +267,7 @@ void logSegmentProbe(int buildingId, const FrontageSlot& slot, const char* resul
                      float slotT) {
     std::string line = "segment_probe: placement #" + std::to_string(buildingId) + " seg="
                        + std::to_string(slot.segmentId) + " road=" + std::to_string(slot.roadId)
-                       + " cell=" + std::to_string(slot.cellId) + " width=" + fmt1(slot.width())
+                       + " bank=" + std::to_string(slot.bankIndex) + " width=" + fmt1(slot.width())
                        + " center_dist=" + fmt1(slot.centerDist) + " -> " + result;
     if (slotT >= 0.f) {
         line += " slot_t=" + fmt1(slotT);

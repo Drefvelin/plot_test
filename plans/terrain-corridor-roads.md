@@ -1,22 +1,20 @@
-# Terrain Corridor Roads + Cell Subdivision
+# Terrain Corridor Roads
 
-Shore and river **corridor roads** are baked from terrain masks (separate inset/spacing from debug overlays), merged into the town road graph, split at interior intersections, culled for parallel Voronoi roads, and used to **subdivide Voronoi cells** into land faces for boundaries, frontage, and placement.
+Shore and river **corridor roads** are baked from terrain masks (separate inset/spacing from debug overlays), merged into the town road graph, split at interior intersections, and used to cull parallel Voronoi roads. They are ordinary roads in the road-only model.
 
 ## Pipeline
 
 ```
 Voronoi roads + disc border
-  → snapshot Voronoi cells (site + boundary for parent lookup)
   → appendCorridorRoads (shore + river graphs)
   → splitRoadsAtIntersections
   → indexJunctions
   → cullVoronoiRoadsParallelToCorridors
   → indexJunctions (again)
-  → subdivideCellsFromRoadGraph (replace town.cells)
   → assignRoadSideInwards + meshes + placement
 ```
 
-Implementation: `TownBuilder.cpp`, `RoadNetwork.cpp`, `CellSubdivision.cpp`, `TerrainBake.cpp`.
+Implementation: `TownBuilder.cpp`, `RoadNetwork.cpp`, `TerrainBake.cpp`.
 
 ## Config (`config.yml` — no code defaults)
 
@@ -58,23 +56,11 @@ Logged on channel `terrain`: `shore_road_nodes`, `river_road_nodes`, insets, spa
 
 | API | Role |
 |-----|------|
-| `appendCorridorRoads` | Emits all corridor polyline segments with `isTerrainCorridor = true`; `cellA/B = -1` until face pass |
+| `appendCorridorRoads` | Emits all corridor polyline segments with `isTerrainCorridor = true` |
 | `splitRoadsAtIntersections` | Interior crosses via `segmentCrossingParams` (PlotGeometry); min segment 0.5u; re-index `road.id`; frontage reset on splits |
 | `cullVoronoiRoadsParallelToCorridors` | Removes parallel non-incident Voronoi roads along corridor chains |
 
 Corridor roads count as **primary** (`primaryRoadCount`).
-
-## Cell subdivision
-
-| Field | Meaning |
-|-------|---------|
-| `Cell.voronoiParentId` | Original Voronoi site index, or nearest site if centroid falls outside pre-split boundaries |
-| `Cell.boundary` | Closed polygon from global face walk (junction CCW rule) |
-| `Cell.roadIds` | Roads on the face boundary |
-
-Faces are discarded when centroid is outside the town disc or `terrain.isForbidden(centroid)`.
-
-`road.cellA` / `road.cellB` are reassigned from face sides (left of `a→b` = `cellA`).
 
 ## Logging
 
@@ -83,16 +69,13 @@ Channel `voronoi`:
 - `corridor_roads emitted=…`
 - `roads_before_corridors`, `roads_after_corridors`, `roads_after_split`
 - `culled_parallel_voronoi=…`
-- `subdivide faces=… cells_before=… cells_after=… discarded_forbidden=…`
-- `snapshot_boundary_ok/fail` (Voronoi-only boundary build used only for parent lookup)
 
 ## Acceptance
 
 - Full corridor roads visible on map (sea + river); junctions (red) at corridor × Voronoi crosses after split
-- No thin sliver cells between corridor and interior Voronoi road on river/coast test areas
+- No thin sliver road strips between corridor and interior Voronoi road on river/coast test areas
 - Radial Voronoi roads still cross corridors at junctions; parallel "back roads" removed
-- Coastal / river strips can become their own cells when corridors close loops with interior roads
-- Buildings place on subdivided frontage without water overlap (`pointInCellBoundary` uses face polygon)
+- Buildings place on road-bank frontage without water overlap (placement validation uses terrain and road-hit checks)
 
 ## Out of scope
 

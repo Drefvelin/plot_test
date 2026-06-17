@@ -15,7 +15,7 @@ plots:
   min_area: 50          # square units (minimum plot area)
   max_area: 200         # square units (maximum plot area)
   max_depth_to_front_ratio: 1.5   # neither side may exceed 1.5x the other
-  frontage_setback: 2.0           # front row sits this many units inside the cell from the road
+  frontage_setback: 2.0           # front row sits this many units back from the road
 
 voronoi:
   scale: 0.4
@@ -51,11 +51,11 @@ colors:
   bridge: [139, 90, 43]
 
 debug:
-  highlight_cell: -1     # -1 off, -2 all cells, or a specific cell id
   highlight_color: [128, 128, 128]
 
 logging:
   directory: logs
+  flush_interval_ms: 2000   # buffer log lines; flush every N ms (0 = only on shutdown)
   files:
     - channel: app
       filename: app.log
@@ -75,3 +75,11 @@ logging:
       filename: points.log
     - channel: terrain
       filename: terrain.log
+    - channel: profile
+      filename: profile.log
+
+growth:
+  auto_grow: 0
+  auto_grow_ms: 50
+  auto_exit: false
+  profile: false

@@ -1,12 +1,36 @@
 #include "PlotGeometry.h"
 
+#include "FrontageZones.h"
+#include "RoadExhaustion.h"
+
 #include "DefCache.h"
+#include "TerrainAtlas.h"
+#include "TownConfig.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
+#include <unordered_set>
+
+namespace {
+
+bool edgeHasNonBuildableSample(const Vec2& a, const Vec2& b, const TerrainAtlas& terrain,
+                               float step) {
+    const Vec2  delta = b - a;
+    const float len   = delta.length();
+    if (len < 1e-4f) {
+        return !terrain.isBuildable(a);
+    }
+    for (float dist = step * 0.5f; dist < len - step * 0.5f; dist += step) {
+        if (!terrain.isBuildable(a + delta * (dist / len))) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool pointOnSegment(const Vec2& p, const Vec2& a, const Vec2& b, float eps = 0.08f) {
-    const Vec2 ab  = b - a;
+    const Vec2  ab    = b - a;
     const float lenSq = ab.x * ab.x + ab.y * ab.y;
     if (lenSq < eps * eps) {
         return (p - a).length() <= eps;
@@ -17,72 +41,6 @@ bool pointOnSegment(const Vec2& p, const Vec2& a, const Vec2& b, float eps = 0.0
     }
     const Vec2 proj{a.x + ab.x * t, a.y + ab.y * t};
     return (p - proj).length() <= eps;
-}
-
-bool pointInPolygon(const Vec2& p, const std::vector<Vec2>& polygon) {
-    if (polygon.size() < 3) {
-        return false;
-    }
-
-    for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
-        if (pointOnSegment(p, polygon[i], polygon[j])) {
-            return true;
-        }
-    }
-
-    bool inside = false;
-    for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
-        const Vec2& a = polygon[i];
-        const Vec2& b = polygon[j];
-        if (((a.y > p.y) != (b.y > p.y))
-            && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y + 1e-12f) + a.x)) {
-            inside = !inside;
-        }
-    }
-    return inside;
-}
-
-bool plotInsideCell(const Plot& plot, const Cell& cell) {
-    if (cell.boundary.size() < 3) {
-        return false;
-    }
-    for (int i = 0; i < 4; ++i) {
-        if (!pointInPolygon(plot.corners[i], cell.boundary)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void buildRoadPlot(const Vec2& roadStart, const Vec2& edgeDir, const Vec2& inward, float setback,
-                   float frontage, float depth, Plot& plot);
-
-// Max depth for a plot with frontage setback; binary-search using the full rectangle test.
-float maxPlotDepthInCell(const Vec2& roadStart, const Vec2& edgeDir, float frontage,
-                         const Vec2& inward, float setback, const Cell& cell) {
-    if (frontage < 1e-3f || setback < 0.f) {
-        return 0.f;
-    }
-
-    const Vec2 front0 = roadStart + inward * setback;
-    const Vec2 front1 = front0 + edgeDir * frontage;
-    if (!pointInPolygon(front0, cell.boundary) || !pointInPolygon(front1, cell.boundary)) {
-        return 0.f;
-    }
-
-    float lo = 0.f;
-    float hi = 512.f;
-    for (int i = 0; i < 18; ++i) {
-        const float mid = (lo + hi) * 0.5f;
-        Plot        probe{};
-        buildRoadPlot(roadStart, edgeDir, inward, setback, frontage, mid, probe);
-        if (plotInsideCell(probe, cell)) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    return lo;
 }
 
 void projectPolygon(const Vec2 corners[4], const Vec2& axis, float& minOut, float& maxOut) {
@@ -104,92 +62,360 @@ bool axisSeparates(const Vec2 a[4], const Vec2 b[4], const Vec2& axis) {
     return maxA <= minB || maxB <= minA;
 }
 
-bool plotsOverlap(const Plot& a, const Plot& b) {
-    for (int i = 0; i < 4; ++i) {
-        const Vec2 edge = a.corners[(i + 1) % 4] - a.corners[i];
-        if (edge.length() < 1e-6f) {
+
+bool polygonEdgesCrossRoads(const Vec2 corners[4], const Town& town, int hostRoadId) {
+    for (const Road& road : town.roads) {
+        if (road.id == hostRoadId) {
             continue;
         }
-        const Vec2 axis = perpendicular(edge.normalized());
-        if (axisSeparates(a.corners, b.corners, axis)) {
+        for (int i = 0; i < 4; ++i) {
+            const Vec2& a = corners[i];
+            const Vec2& b = corners[(i + 1) % 4];
+            if (segmentsCrossInInterior(a, b, road.a, road.b, 0.03f)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool polygonBuildableImpl(const Vec2 corners[4], const TerrainAtlas& terrain, float edgeStep) {
+    if (!terrain.valid) {
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (!terrain.isBuildable(corners[i])) {
             return false;
         }
     }
     for (int i = 0; i < 4; ++i) {
-        const Vec2 edge = b.corners[(i + 1) % 4] - b.corners[i];
-        if (edge.length() < 1e-6f) {
-            continue;
-        }
-        const Vec2 axis = perpendicular(edge.normalized());
-        if (axisSeparates(a.corners, b.corners, axis)) {
+        if (edgeHasNonBuildableSample(corners[i], corners[(i + 1) % 4], terrain, edgeStep)) {
             return false;
         }
     }
     return true;
 }
 
-bool footprintsOverlap(const BuildingFootprint& a, const BuildingFootprint& b);
-
-bool overlapsInstances(const Plot& plot, const std::vector<BuildingInstance>& instances) {
-    BuildingFootprint plotFootprint{};
+bool cornersValid(const Vec2 corners[4], const Town& town, const TerrainAtlas* terrain) {
     for (int i = 0; i < 4; ++i) {
-        plotFootprint.corners[i] = plot.corners[i];
+        if (!pointInsideTownDisc(town, corners[i])) {
+            return false;
+        }
     }
+    if (terrain != nullptr && terrain->valid && !polygonBuildableImpl(corners, *terrain, 0.5f)) {
+        return false;
+    }
+    return true;
+}
 
-    for (const BuildingInstance& existing : instances) {
-        if (existing.placementMode == BuildingPlacementMode::SegmentGapFill) {
-            if (existing.footprints.empty()) {
-                continue;
-            }
-            if (footprintsOverlap(plotFootprint, existing.footprints[0])) {
+BuildingFootprint plotAsFootprint(const Plot& plot) {
+    BuildingFootprint fp{};
+    for (int i = 0; i < 4; ++i) {
+        fp.corners[i] = plot.corners[i];
+    }
+    return fp;
+}
+
+bool instanceOnRoadBank(const BuildingInstance& instance, int roadId, int bankIndex) {
+    if (instance.placementMode == BuildingPlacementMode::SegmentGapFill) {
+        return instance.roadId == roadId && (bankIndex < 0 || instance.roadBank == bankIndex);
+    }
+    return instance.plot.roadId == roadId && (bankIndex < 0 || instance.plot.roadBank == bankIndex);
+}
+
+}  // namespace
+
+float distancePointToSegment(const Vec2& p, const Vec2& a, const Vec2& b) {
+    const Vec2  ab    = b - a;
+    const float lenSq = ab.x * ab.x + ab.y * ab.y;
+    if (lenSq < 1e-8f) {
+        return (p - a).length();
+    }
+    const float t = std::clamp(((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / lenSq, 0.f, 1.f);
+    return (p - (a + ab * t)).length();
+}
+
+bool bankHasBuildingOnSide(const Town& town, int roadId, int bankIndex) {
+    for (const BuildingInstance& instance : town.buildingInstances) {
+        if (instance.placementMode == BuildingPlacementMode::SegmentGapFill) {
+            if (instance.roadId == roadId
+                && (bankIndex < 0 || instance.roadBank == bankIndex)) {
                 return true;
             }
-            continue;
-        }
-        if (existing.plot.id < 0) {
-            continue;
-        }
-        if (plotsOverlap(plot, existing.plot)) {
+        } else if (instance.plot.roadId == roadId
+                   && (bankIndex < 0 || instance.plot.roadBank == bankIndex)) {
             return true;
         }
     }
     return false;
 }
 
-bool footprintsOverlap(const BuildingFootprint& a, const BuildingFootprint& b) {
-    for (int i = 0; i < 4; ++i) {
-        const Vec2 edge = a.corners[(i + 1) % 4] - a.corners[i];
-        if (edge.length() < 1e-6f) {
+bool polygonBuildable(const Vec2 corners[4], const TerrainAtlas& terrain, float edgeStep) {
+    return polygonBuildableImpl(corners, terrain, edgeStep);
+}
+
+bool pointInPolygon(const Vec2& p, const std::vector<Vec2>& polygon) {
+    if (polygon.size() < 3) {
+        return false;
+    }
+    for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+        if (pointOnSegment(p, polygon[i], polygon[j])) {
+            return true;
+        }
+    }
+    bool inside = false;
+    for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+        const Vec2& a = polygon[i];
+        const Vec2& b = polygon[j];
+        if (((a.y > p.y) != (b.y > p.y))
+            && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y + 1e-12f) + a.x)) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+void buildRoadPlot(const Vec2& roadStart, const Vec2& edgeDir, const Vec2& inward, float setback,
+                   float frontage, float depth, Plot& plot) {
+    plot.frontage = frontage;
+    plot.depth    = depth;
+    plot.area     = frontage * depth;
+    plot.corners[0] = roadStart + inward * setback;
+    plot.corners[1] = plot.corners[0] + edgeDir * frontage;
+    plot.corners[2] = plot.corners[1] + inward * depth;
+    plot.corners[3] = plot.corners[0] + inward * depth;
+}
+
+Vec2 plotCenter(const Plot& plot) {
+    return (plot.corners[0] + plot.corners[1] + plot.corners[2] + plot.corners[3]) * 0.25f;
+}
+
+void invalidateRoadTopologyCaches(Town& town) {
+    ++town.roadTopologyGeneration;
+    for (Road& road : town.roads) {
+        road.sideA.depthCacheEntries.clear();
+        road.sideA.depthCacheTopologyGen = 0;
+        road.sideB.depthCacheEntries.clear();
+        road.sideB.depthCacheTopologyGen = 0;
+    }
+}
+
+void invalidateWallSpanCacheForBank(Town& town, int roadId, int bankIndex) {
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return;
+    }
+    RoadSideFrontage* side = town.roads[static_cast<std::size_t>(roadId)].sideBank(bankIndex);
+    if (side == nullptr) {
+        return;
+    }
+    side->wallSpans = BankWallSpanCache{};
+}
+
+namespace {
+
+float maxPlotDepthToRoadHitImpl(const Vec2& roadStart, const Vec2& edgeDir, float frontage,
+                                const Vec2& inward, float setback, int hostRoadId,
+                                const Town& town) {
+    if (frontage < 1e-3f || inward.length() < 1e-4f) {
+        return 0.f;
+    }
+
+    float best = std::numeric_limits<float>::max();
+    const Vec2 samples[] = {
+        roadStart + inward * setback,
+        roadStart + edgeDir * (frontage * 0.5f) + inward * setback,
+        roadStart + edgeDir * frontage + inward * setback,
+    };
+
+    for (const Vec2& sample : samples) {
+        for (const Road& road : town.roads) {
+            if (road.id == hostRoadId) {
+                continue;
+            }
+            const float hit = raySegmentHitDist(sample, inward.normalized(), road.a, road.b, 512.f);
+            if (hit > 0.25f) {
+                best = std::min(best, hit);
+            }
+        }
+    }
+
+    if (best == std::numeric_limits<float>::max()) {
+        return 0.f;
+    }
+    return best * 0.5f;
+}
+
+void mergeWallSpans(std::vector<RoadWallSpan>& spans) {
+    if (spans.empty()) {
+        return;
+    }
+    std::sort(spans.begin(), spans.end(),
+              [](const RoadWallSpan& lhs, const RoadWallSpan& rhs) { return lhs.tMin < rhs.tMin; });
+    std::vector<RoadWallSpan> merged;
+    merged.reserve(spans.size());
+    for (const RoadWallSpan& span : spans) {
+        if (merged.empty() || span.tMin > merged.back().tMax + 1e-3f) {
+            merged.push_back(span);
             continue;
         }
-        const Vec2 axis = perpendicular(edge.normalized());
-        if (axisSeparates(a.corners, b.corners, axis)) {
+        merged.back().tMax = std::max(merged.back().tMax, span.tMax);
+    }
+    spans.swap(merged);
+}
+
+}  // namespace
+
+float maxPlotDepthToRoadHit(const Vec2& roadStart, const Vec2& edgeDir, float frontage,
+                            const Vec2& inward, float setback, int hostRoadId, int bankIndex,
+                            Town& town) {
+    if (hostRoadId < 0 || hostRoadId >= static_cast<int>(town.roads.size())) {
+        return maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback, hostRoadId,
+                                       town);
+    }
+
+    RoadSideFrontage* side = town.roads[static_cast<std::size_t>(hostRoadId)].sideBank(bankIndex);
+    if (side == nullptr) {
+        return maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback, hostRoadId,
+                                       town);
+    }
+
+    if (side->depthCacheTopologyGen != town.roadTopologyGeneration) {
+        side->depthCacheEntries.clear();
+        side->depthCacheTopologyGen = town.roadTopologyGeneration;
+    }
+
+    Vec2 origin{};
+    Vec2 farEnd{};
+    Vec2 edgeDirFrame{};
+    if (!roadFrameForBank(town.roads[static_cast<std::size_t>(hostRoadId)], bankIndex, origin,
+                          farEnd, edgeDirFrame)) {
+        return maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback, hostRoadId,
+                                       town);
+    }
+
+    const float tAlong = (roadStart - origin).dot(edgeDirFrame);
+    const DepthCacheKey key{tAlong, frontage, setback};
+    const auto          found = side->depthCacheEntries.find(key);
+    if (found != side->depthCacheEntries.end()) {
+        return found->second;
+    }
+
+    const float result =
+        maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback, hostRoadId, town);
+    side->depthCacheEntries[key] = result;
+    return result;
+}
+
+void gapsFromOccupiedSpans(const std::vector<RoadWallSpan>& occupied, float roadLen,
+                           float minGapWidth, std::vector<RoadWallSpan>& outGaps) {
+    outGaps.clear();
+    float prev = 0.f;
+    for (const RoadWallSpan& span : occupied) {
+        if (span.tMin > prev + minGapWidth) {
+            outGaps.push_back({prev, span.tMin});
+        }
+        prev = std::max(prev, span.tMax);
+    }
+    if (roadLen > prev + minGapWidth) {
+        outGaps.push_back({prev, roadLen});
+    }
+}
+
+void getCachedBuildingWallSpans(Town& town, int roadId, int bankIndex, const Vec2& origin,
+                                const Vec2& edgeDir, float roadLen,
+                                std::vector<RoadWallSpan>& outSpans) {
+    outSpans.clear();
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return;
+    }
+
+    RoadSideFrontage* side = town.roads[static_cast<std::size_t>(roadId)].sideBank(bankIndex);
+    if (side == nullptr) {
+        return;
+    }
+
+    BankWallSpanCache& cache = side->wallSpans;
+    const int          instanceGen = static_cast<int>(town.buildingInstances.size());
+    if (cache.wallSpanInstanceGen == static_cast<std::uint32_t>(instanceGen)
+        && cache.wallSpanTopologyGen == town.roadTopologyGeneration
+        && (cache.origin - origin).length() < 1e-3f
+        && (cache.edgeDir - edgeDir).length() < 1e-3f
+        && std::abs(cache.roadLen - roadLen) < 1e-3f) {
+        outSpans = cache.occupiedSpans;
+        return;
+    }
+
+    std::vector<RoadWallSpan> raw;
+    collectBuildingWallSpansOnSide(town, roadId, bankIndex, origin, edgeDir, raw);
+    mergeWallSpans(raw);
+
+    cache.wallSpanInstanceGen  = static_cast<std::uint32_t>(instanceGen);
+    cache.wallSpanTopologyGen  = town.roadTopologyGeneration;
+    cache.origin               = origin;
+    cache.edgeDir              = edgeDir;
+    cache.roadLen              = roadLen;
+    cache.occupiedSpans        = raw;
+    outSpans                   = raw;
+}
+
+bool plotsOverlap(const Plot& a, const Plot& b) {
+    for (int i = 0; i < 4; ++i) {
+        const Vec2 edge = a.corners[(i + 1) % 4] - a.corners[i];
+        if (edge.length() > 1e-6f && axisSeparates(a.corners, b.corners, perpendicular(edge.normalized()))) {
             return false;
         }
     }
     for (int i = 0; i < 4; ++i) {
         const Vec2 edge = b.corners[(i + 1) % 4] - b.corners[i];
-        if (edge.length() < 1e-6f) {
-            continue;
-        }
-        const Vec2 axis = perpendicular(edge.normalized());
-        if (axisSeparates(a.corners, b.corners, axis)) {
+        if (edge.length() > 1e-6f && axisSeparates(a.corners, b.corners, perpendicular(edge.normalized()))) {
             return false;
         }
     }
     return true;
 }
 
-bool footprintInsideCell(const BuildingFootprint& footprint, const Cell& cell) {
-    if (cell.boundary.size() < 3) {
-        return false;
+bool footprintsOverlap(const BuildingFootprint& a, const BuildingFootprint& b) {
+    for (int i = 0; i < 4; ++i) {
+        const Vec2 edge = a.corners[(i + 1) % 4] - a.corners[i];
+        if (edge.length() > 1e-6f && axisSeparates(a.corners, b.corners, perpendicular(edge.normalized()))) {
+            return false;
+        }
     }
-    for (const Vec2& corner : footprint.corners) {
-        if (!pointInPolygon(corner, cell.boundary)) {
+    for (int i = 0; i < 4; ++i) {
+        const Vec2 edge = b.corners[(i + 1) % 4] - b.corners[i];
+        if (edge.length() > 1e-6f && axisSeparates(a.corners, b.corners, perpendicular(edge.normalized()))) {
             return false;
         }
     }
     return true;
+}
+
+bool footprintPlacementValid(const BuildingFootprint& footprint, const Town& town,
+                             const TerrainAtlas* terrain, float setback, int hostRoadId) {
+    if (!cornersValid(footprint.corners, town, terrain)) {
+        return false;
+    }
+    if (polygonEdgesCrossRoads(footprint.corners, town, hostRoadId)) {
+        return false;
+    }
+    if (footprintOverlapsAlleys(footprint, town, setback, hostRoadId)) {
+        return false;
+    }
+    return true;
+}
+
+bool plotPlacementValid(const Plot& plot, const Town& town, const TerrainAtlas* terrain,
+                        float setback, int hostRoadId) {
+    if (!cornersValid(plot.corners, town, terrain)) {
+        return false;
+    }
+    if (polygonEdgesCrossRoads(plot.corners, town, hostRoadId)) {
+        return false;
+    }
+    if (overlapsInstances(plot, town.buildingInstances)) {
+        return false;
+    }
+    return !plotOverlapsAlleys(plot, town, setback, hostRoadId);
 }
 
 Vec2 instancePlacementPoint(const BuildingInstance& instance) {
@@ -204,13 +430,28 @@ Vec2 instancePlacementPoint(const BuildingInstance& instance) {
     return plotCenter(instance.plot);
 }
 
+bool overlapsInstances(const Plot& plot, const std::vector<BuildingInstance>& instances) {
+    const BuildingFootprint plotFootprint = plotAsFootprint(plot);
+    for (const BuildingInstance& existing : instances) {
+        if (existing.placementMode == BuildingPlacementMode::SegmentGapFill) {
+            if (!existing.footprints.empty() && footprintsOverlap(plotFootprint, existing.footprints[0])) {
+                return true;
+            }
+            continue;
+        }
+        if (existing.plot.id >= 0 && plotsOverlap(plot, existing.plot)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool footprintOverlapsMains(const BuildingFootprint& footprint, const Town& town,
                             const DefCache& defs) {
     Plot probe{};
     for (int i = 0; i < 4; ++i) {
         probe.corners[i] = footprint.corners[i];
     }
-
     for (const BuildingInstance& instance : town.buildingInstances) {
         if (instance.placementMode == BuildingPlacementMode::PlotLot && instance.plot.id >= 0) {
             const BuildingDef* def = defs.building(instance.buildingType);
@@ -219,15 +460,28 @@ bool footprintOverlapsMains(const BuildingFootprint& footprint, const Town& town
             }
         }
         for (const BuildingFootprint& existing : instance.footprints) {
-            if (!existing.mainBuilding) {
-                continue;
-            }
-            if (footprintsOverlap(footprint, existing)) {
+            if (existing.mainBuilding && footprintsOverlap(footprint, existing)) {
                 return true;
             }
         }
     }
     return false;
+}
+
+float footprintTMin(const BuildingFootprint& footprint, const Vec2& origin, const Vec2& edgeDir) {
+    float best = (footprint.corners[0] - origin).dot(edgeDir);
+    for (int i = 1; i < 4; ++i) {
+        best = std::min(best, (footprint.corners[i] - origin).dot(edgeDir));
+    }
+    return best;
+}
+
+float footprintTMax(const BuildingFootprint& footprint, const Vec2& origin, const Vec2& edgeDir) {
+    float best = (footprint.corners[0] - origin).dot(edgeDir);
+    for (int i = 1; i < 4; ++i) {
+        best = std::max(best, (footprint.corners[i] - origin).dot(edgeDir));
+    }
+    return best;
 }
 
 float plotTMin(const Plot& plot, const Vec2& origin, const Vec2& edgeDir) {
@@ -242,250 +496,158 @@ float plotTMax(const Plot& plot, const Vec2& origin, const Vec2& edgeDir) {
     return std::max(t0, t1);
 }
 
-bool instanceOnRoadSideBank(const BuildingInstance& instance, int roadId, int cellId,
-                            int bankIndex) {
-    if (instance.placementMode == BuildingPlacementMode::SegmentGapFill) {
-        if (instance.roadId != roadId || instance.cellId != cellId) {
-            return false;
-        }
-        if (bankIndex >= 0 && instance.roadBank >= 0) {
-            return instance.roadBank == bankIndex;
-        }
-        return true;
-    }
-    if (instance.plot.roadId != roadId || instance.plot.cellId != cellId) {
-        return false;
-    }
-    if (bankIndex >= 0 && instance.plot.roadBank >= 0) {
-        return instance.plot.roadBank == bankIndex;
-    }
-    return true;
-}
-
-void collectBuildingWallSpansOnSide(const Town& town, int roadId, int cellId, int bankIndex,
+void collectBuildingWallSpansOnSide(const Town& town, int roadId, int bankIndex,
                                     const Vec2& origin, const Vec2& edgeDir,
                                     std::vector<RoadWallSpan>& out) {
-    constexpr float kWallEps = 0.08f;
     out.clear();
     for (const BuildingInstance& instance : town.buildingInstances) {
-        if (!instanceOnRoadSideBank(instance, roadId, cellId, bankIndex)) {
+        if (!instanceOnRoadBank(instance, roadId, bankIndex)) {
             continue;
         }
-
-        bool addedSpan = false;
+        if (instance.placementMode == BuildingPlacementMode::PlotLot && instance.plot.id >= 0) {
+            out.push_back({plotTMin(instance.plot, origin, edgeDir),
+                           plotTMax(instance.plot, origin, edgeDir)});
+        }
         for (const BuildingFootprint& footprint : instance.footprints) {
-            if (!footprint.mainBuilding) {
-                continue;
-            }
-            RoadWallSpan span;
-            span.tMin = footprintTMin(footprint, origin, edgeDir);
-            span.tMax = footprintTMax(footprint, origin, edgeDir);
-            if (span.tMax > span.tMin + 1e-3f) {
-                out.push_back(span);
-                addedSpan = true;
-            }
-        }
-
-        if (!addedSpan && instance.placementMode == BuildingPlacementMode::PlotLot) {
-            RoadWallSpan span;
-            span.tMin = plotTMin(instance.plot, origin, edgeDir);
-            span.tMax = plotTMax(instance.plot, origin, edgeDir);
-            if (span.tMax > span.tMin + 1e-3f) {
-                out.push_back(span);
+            if (footprint.mainBuilding) {
+                out.push_back({footprintTMin(footprint, origin, edgeDir),
+                               footprintTMax(footprint, origin, edgeDir)});
             }
         }
     }
-
-    std::sort(out.begin(), out.end(),
-              [](const RoadWallSpan& lhs, const RoadWallSpan& rhs) { return lhs.tMin < rhs.tMin; });
-
-    std::vector<RoadWallSpan> merged;
-    for (const RoadWallSpan& span : out) {
-        if (merged.empty() || span.tMin > merged.back().tMax + kWallEps) {
-            merged.push_back(span);
-            continue;
-        }
-        merged.back().tMax = std::max(merged.back().tMax, span.tMax);
-    }
-    out.swap(merged);
+    std::sort(out.begin(), out.end(), [](const RoadWallSpan& a, const RoadWallSpan& b) {
+        return a.tMin < b.tMin;
+    });
 }
 
-void collectWallGapsOnSide(const Town& town, int roadId, int cellId, int bankIndex,
-                           const Vec2& origin, const Vec2& edgeDir, float roadLen,
-                           float minGapWidth, std::vector<RoadWallSpan>& outGaps) {
-    (void)origin;
-    (void)edgeDir;
-    outGaps.clear();
-
+void collectWallGapsOnSide(Town& town, int roadId, int bankIndex, const Vec2& origin,
+                           const Vec2& edgeDir, float roadLen, float minGapWidth,
+                           std::vector<RoadWallSpan>& outGaps) {
     std::vector<RoadWallSpan> spans;
-    collectBuildingWallSpansOnSide(town, roadId, cellId, bankIndex, origin, edgeDir, spans);
-
-    float prevEnd = 0.f;
-    for (const RoadWallSpan& span : spans) {
-        if (span.tMin > prevEnd + minGapWidth - 1e-3f) {
-            outGaps.push_back({prevEnd, span.tMin});
-        }
-        prevEnd = std::max(prevEnd, span.tMax);
-    }
-    if (roadLen > prevEnd + minGapWidth - 1e-3f) {
-        outGaps.push_back({prevEnd, roadLen});
-    }
+    getCachedBuildingWallSpans(town, roadId, bankIndex, origin, edgeDir, roadLen, spans);
+    gapsFromOccupiedSpans(spans, roadLen, minGapWidth, outGaps);
 }
 
-namespace {
-
-bool gapNearExistingSecondary(const Town& town, int cellId, const Vec2& gapPt, float eps = 5.f) {
-    for (const SecondaryRoadRecord& rec : town.secondaryRoadRecords) {
-        if (rec.hostCellId != cellId) {
-            continue;
-        }
-        if ((rec.a - gapPt).length() < eps) {
-            return true;
-        }
-    }
-    for (const Road& road : town.roads) {
-        if (!road.isSecondary || road.hostCellId != cellId) {
-            continue;
-        }
-        if ((road.a - gapPt).length() < eps) {
-            return true;
-        }
-    }
-    return false;
+void collectAllPrimaryWallGaps(Town& town, float minGapWidth, std::vector<WallGap>& out) {
+    collectWallGapsInDistRange(town, minGapWidth, 1e9f, out);
 }
 
-int secondaryCountInCell(const Town& town, int cellId) {
-    int count = 0;
-    for (const SecondaryRoadRecord& rec : town.secondaryRoadRecords) {
-        if (rec.hostCellId == cellId) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-}  // namespace
-
-bool wallGapNearExistingSecondary(const Town& town, int cellId, const Vec2& gapPt, float eps) {
-    return gapNearExistingSecondary(town, cellId, gapPt, eps);
-}
-
-int secondaryRoadCountInCell(const Town& town, int cellId) {
-    return secondaryCountInCell(town, cellId);
-}
-
-void collectAllPrimaryWallGaps(const Town& town, float minGapWidth, std::vector<WallGap>& out) {
+void collectWallGapsInDistRange(Town& town, float minGapWidth, float maxDistInclusive,
+                                  std::vector<WallGap>& out) {
     out.clear();
-    int nextId = 0;
-
-    const auto collectRoadGaps = [&](const Road& road) {
-        const float roadLen = road.length();
-        if (roadLen < 1e-3f) {
-            return;
+    int nextGapId = 0;
+    for (const Road& road : town.roads) {
+        if (road.isBridge) {
+            continue;
         }
-
-        if (road.isSameCellSecondary()) {
+        const float dist = roadMidpointCenterDist(town, road);
+        if (dist > maxDistInclusive + 1e-3f) {
+            continue;
+        }
+        for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
+            const RoadSideFrontage* side = road.sideBank(bankIndex);
+            if (bankAlleyExhaustedVerified(town, road.id, bankIndex, minGapWidth,
+                                           maxDistInclusive)) {
+                continue;
+            }
+            if (side->inward.length() < 1e-4f) {
+                continue;
+            }
             Vec2 origin{};
             Vec2 farEnd{};
             Vec2 edgeDir{};
-            if (!roadFrameForCell(road, road.hostCellId, origin, farEnd, edgeDir)) {
-                return;
-            }
-            for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
-                const RoadSideFrontage* side = road.sideBank(bankIndex);
-                if (side->cellId != road.hostCellId || side->inward.length() < 1e-4f) {
-                    continue;
-                }
-                std::vector<RoadWallSpan> spans;
-                collectWallGapsOnSide(town, road.id, road.hostCellId, bankIndex, origin, edgeDir,
-                                      roadLen, minGapWidth, spans);
-                for (const RoadWallSpan& span : spans) {
-                    WallGap gap;
-                    gap.id        = nextId++;
-                    gap.roadId    = road.id;
-                    gap.cellId    = road.hostCellId;
-                    gap.bankIndex = bankIndex;
-                    gap.tMin      = span.tMin;
-                    gap.tMax      = span.tMax;
-                    gap.origin    = origin;
-                    gap.edgeDir   = edgeDir;
-                    gap.inward    = side->inward;
-                    out.push_back(gap);
-                }
-            }
-            return;
-        }
-
-        for (const RoadSideFrontage* side : {&road.sideA, &road.sideB}) {
-            if (side->cellId < 0 || side->inward.length() < 1e-4f) {
+            if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
                 continue;
             }
-
-            Vec2 origin{};
-            Vec2 farEnd{};
-            Vec2 edgeDir{};
-            if (!roadFrameForCell(road, side->cellId, origin, farEnd, edgeDir)) {
-                continue;
-            }
-
-            const int bankIndex = (side == &road.sideB) ? 1 : 0;
-            std::vector<RoadWallSpan> spans;
-            collectWallGapsOnSide(town, road.id, side->cellId, bankIndex, origin, edgeDir, roadLen,
-                                  minGapWidth, spans);
-
-            for (const RoadWallSpan& span : spans) {
+            std::vector<RoadWallSpan> gaps;
+            collectWallGapsOnSide(town, road.id, bankIndex, origin, edgeDir, road.length(),
+                                  minGapWidth, gaps);
+            for (const RoadWallSpan& span : gaps) {
                 WallGap gap;
-                gap.id        = nextId++;
-                gap.roadId    = road.id;
-                gap.cellId    = side->cellId;
+                gap.id = nextGapId++;
+                gap.roadId = road.id;
                 gap.bankIndex = bankIndex;
-                gap.tMin      = span.tMin;
-                gap.tMax      = span.tMax;
-                gap.origin    = origin;
-                gap.edgeDir   = edgeDir;
-                gap.inward    = side->inward;
+                gap.tMin = span.tMin;
+                gap.tMax = span.tMax;
+                gap.origin = origin;
+                gap.edgeDir = edgeDir;
+                gap.inward = side->inward;
                 out.push_back(gap);
             }
         }
-    };
-
-    for (const Road& road : town.roads) {
-        if (road.isSecondary) {
-            continue;
-        }
-        collectRoadGaps(road);
     }
+}
 
-    for (const Road& road : town.roads) {
-        if (!road.isSecondary) {
-            continue;
+void collectWallGapsInHopRange(Town& town, float minGapWidth, int /*minHopInclusive*/,
+                               int maxHopInclusive, const std::vector<int>& /*junctionHops*/,
+                               std::vector<WallGap>& out) {
+    const float maxDist = ringDistAtHop(town, maxHopInclusive);
+    collectWallGapsInDistRange(town, minGapWidth, maxDist, out);
+}
+
+void clearAlleyGapStateForRoad(Town& town, int roadId) {
+    town.alleyCompleteRoadIds.erase(roadId);
+    for (auto it = town.checkedAlleyGaps.begin(); it != town.checkedAlleyGaps.end();) {
+        if (it->roadId == roadId) {
+            it = town.checkedAlleyGaps.erase(it);
+        } else {
+            ++it;
         }
-        collectRoadGaps(road);
     }
 }
 
 WallGapKey wallGapKey(const WallGap& gap) {
     WallGapKey key;
-    key.roadId    = gap.roadId;
-    key.cellId    = gap.cellId;
+    key.roadId = gap.roadId;
     key.bankIndex = gap.bankIndex;
-    key.tMin      = gap.tMin;
-    key.tMax      = gap.tMax;
+    key.tMin = gap.tMin;
+    key.tMax = gap.tMax;
     return key;
 }
 
 bool isAlleyGapChecked(const Town& town, const WallGap& gap) {
-    return town.checkedAlleyGaps.find(wallGapKey(gap)) != town.checkedAlleyGaps.end();
+    return town.checkedAlleyGaps.count(wallGapKey(gap)) != 0;
 }
 
 void markAlleyGapChecked(Town& town, const WallGap& gap) {
     town.checkedAlleyGaps.insert(wallGapKey(gap));
 }
 
-bool cellHasUncheckedAlleyGaps(const Town& town, int cellId,
-                               const std::vector<WallGap>& allGaps) {
-    for (const WallGap& gap : allGaps) {
-        if (gap.cellId == cellId && !isAlleyGapChecked(town, gap)) {
+bool bankHasUncheckedAlleyGaps(Town& town, int roadId, int bankIndex, float minGapWidth,
+                                 float maxDistInclusive) {
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size()) || minGapWidth <= 0.f) {
+        return false;
+    }
+    const Road& road = town.roads[static_cast<std::size_t>(roadId)];
+    if (road.isBridge) {
+        return false;
+    }
+    const float dist = roadMidpointCenterDist(town, road);
+    if (dist > maxDistInclusive + 1e-3f) {
+        return false;
+    }
+    const RoadSideFrontage* side = road.sideBank(bankIndex);
+    if (side == nullptr || side->inward.length() < 1e-4f) {
+        return false;
+    }
+
+    Vec2 origin{};
+    Vec2 farEnd{};
+    Vec2 edgeDir{};
+    if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
+        return false;
+    }
+
+    std::vector<RoadWallSpan> spans;
+    collectWallGapsOnSide(town, roadId, bankIndex, origin, edgeDir, road.length(), minGapWidth,
+                          spans);
+    for (const RoadWallSpan& span : spans) {
+        WallGap gap;
+        gap.roadId    = roadId;
+        gap.bankIndex = bankIndex;
+        gap.tMin      = span.tMin;
+        gap.tMax      = span.tMax;
+        if (!isAlleyGapChecked(town, gap)) {
             return true;
         }
     }
@@ -499,249 +661,218 @@ bool isSecondaryHostGap(const Town& town, const WallGap& gap) {
     return town.roads[static_cast<std::size_t>(gap.roadId)].isSecondary;
 }
 
-bool cellHasUncheckedPrimaryAlleyGaps(const Town& town, int cellId,
-                                      const std::vector<WallGap>& allGaps) {
-    for (const WallGap& gap : allGaps) {
-        if (gap.cellId == cellId && !isAlleyGapChecked(town, gap)
-            && !isSecondaryHostGap(town, gap)) {
+bool wallGapNearExistingSecondary(const Town& town, int roadId, const Vec2& gapPt, float eps) {
+    for (const SecondaryRoadRecord& rec : town.secondaryRoadRecords) {
+        if (rec.hostRoadId == roadId
+            && distancePointToSegment(gapPt, rec.a, rec.b) <= eps) {
             return true;
         }
     }
     return false;
 }
 
-bool cellHasUncheckedSecondaryHostAlleyGaps(const Town& town, int cellId,
-                                            const std::vector<WallGap>& allGaps) {
-    for (const WallGap& gap : allGaps) {
-        if (gap.cellId == cellId && !isAlleyGapChecked(town, gap)
-            && isSecondaryHostGap(town, gap)) {
+bool segmentIntersects2D(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1) {
+    return segmentsIntersect2D(a0, a1, b0, b1);
+}
+
+bool segmentIntersectsFootprint(const Vec2& a, const Vec2& b, const BuildingFootprint& fp) {
+    for (int i = 0; i < 4; ++i) {
+        if (segmentsIntersect2D(a, b, fp.corners[i], fp.corners[(i + 1) % 4])) {
             return true;
         }
     }
     return false;
 }
 
-float footprintTMin(const BuildingFootprint& footprint, const Vec2& origin, const Vec2& edgeDir) {
-    float tMin = std::numeric_limits<float>::max();
-    for (const Vec2& corner : footprint.corners) {
-        tMin = std::min(tMin, (corner - origin).dot(edgeDir));
-    }
-    return tMin;
-}
-
-float footprintTMax(const BuildingFootprint& footprint, const Vec2& origin, const Vec2& edgeDir) {
-    float tMax = -std::numeric_limits<float>::max();
-    for (const Vec2& corner : footprint.corners) {
-        tMax = std::max(tMax, (corner - origin).dot(edgeDir));
-    }
-    return tMax;
-}
-
-bool roadFrameForCell(const Road& road, int cellId, Vec2& origin, Vec2& farEnd, Vec2& edgeDir) {
-    if (road.cellA == cellId) {
-        origin = road.a;
-        farEnd = road.b;
-    } else if (road.cellB == cellId) {
-        origin = road.b;
-        farEnd = road.a;
-    } else {
-        return false;
-    }
-
-    edgeDir = (farEnd - origin).normalized();
-    return edgeDir.length() >= 1e-4f;
-}
-
-float distanceToSegment(const Vec2& p, const Vec2& a, const Vec2& b) {
-    const Vec2  ab    = b - a;
-    const float lenSq = ab.x * ab.x + ab.y * ab.y;
-    if (lenSq < 1e-8f) {
-        return (p - a).length();
-    }
-    const float t = std::clamp(((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / lenSq, 0.f, 1.f);
-    const Vec2  proj{a.x + ab.x * t, a.y + ab.y * t};
-    return (p - proj).length();
-}
-
-double polygonSignedArea(const std::vector<Vec2>& polygon) {
-    double area = 0.0;
-    for (std::size_t i = 0; i < polygon.size(); ++i) {
-        const Vec2& p0 = polygon[i];
-        const Vec2& p1 = polygon[(i + 1) % polygon.size()];
-        area += static_cast<double>(p0.x) * p1.y - static_cast<double>(p1.x) * p0.y;
-    }
-    return area * 0.5;
-}
-
-bool setbackInside(const Vec2& roadPoint, const Vec2& dir, float setback,
-                   const std::vector<Vec2>& boundary) {
-    return pointInPolygon(roadPoint + dir * setback, boundary);
-}
-
-bool inwardFromBoundaryEdge(const Vec2& roadPoint, const Vec2& edgeDir, const Cell& cell,
-                            Vec2& inward) {
-    if (cell.boundary.size() < 3) {
-        return false;
-    }
-
-    constexpr float kOnEdgeEps = 0.35f;
-    constexpr float kAlignDot  = 0.75f;
-
-    const std::size_t n         = cell.boundary.size();
-    const bool        ccw       = polygonSignedArea(cell.boundary) >= 0.0;
-    int               bestEdge  = -1;
-    float             bestDist  = kOnEdgeEps;
-
-    for (std::size_t i = 0; i < n; ++i) {
-        const Vec2& p0    = cell.boundary[i];
-        const Vec2& p1    = cell.boundary[(i + 1) % n];
-        const float dist  = distanceToSegment(roadPoint, p0, p1);
-        if (dist > bestDist) {
-            continue;
-        }
-
-        Vec2 segDir = (p1 - p0).normalized();
-        if (segDir.length() < 1e-4f) {
-            continue;
-        }
-        const float align = std::abs(edgeDir.normalized().dot(segDir));
-        if (align < kAlignDot) {
-            continue;
-        }
-
-        bestDist  = dist;
-        bestEdge  = static_cast<int>(i);
-    }
-
-    if (bestEdge < 0) {
-        return false;
-    }
-
-    const Vec2& p0    = cell.boundary[static_cast<std::size_t>(bestEdge)];
-    const Vec2& p1    = cell.boundary[static_cast<std::size_t>((bestEdge + 1) % n)];
-    Vec2        eDir  = (p1 - p0).normalized();
-    if (edgeDir.normalized().dot(eDir) < 0.f) {
-        eDir = eDir * -1.f;
-    }
-
-    const Vec2 left = perpendicular(eDir);
-    inward          = ccw ? left : left * -1.f;
-
-    constexpr float kProbe = 0.15f;
-    if (!pointInPolygon(roadPoint + inward * kProbe, cell.boundary)) {
-        inward = inward * -1.f;
-    }
-    return true;
-}
-
-Vec2 inwardTowardSite(const Vec2& roadPoint, const Vec2& edgeDir, const Vec2& site) {
-    const Vec2 edgeNorm = edgeDir.normalized();
-    const Vec2 left     = perpendicular(edgeNorm);
-    const Vec2 right    = left * -1.f;
-    const Vec2 toSite   = site - roadPoint;
-    return (left.dot(toSite) >= right.dot(toSite)) ? left : right;
-}
-
-bool inwardAtRoadPoint(const Vec2& roadPoint, const Vec2& edgeDir, const Cell& cell, float setback,
-                       Vec2& inward) {
-    if (cell.boundary.size() < 3 || edgeDir.length() < 1e-4f) {
-        return false;
-    }
-
-    const Vec2 edgeNorm = edgeDir.normalized();
-    const Vec2 left     = perpendicular(edgeNorm);
-    const Vec2 right    = left * -1.f;
-    const Vec2 toSite   = cell.site - roadPoint;
-
-    const bool leftIn  = setbackInside(roadPoint, left, setback, cell.boundary);
-    const bool rightIn = setbackInside(roadPoint, right, setback, cell.boundary);
-
-    if (leftIn && !rightIn) {
-        inward = left;
-        return true;
-    }
-    if (rightIn && !leftIn) {
-        inward = right;
-        return true;
-    }
-    if (leftIn && rightIn) {
-        inward = (left.dot(toSite) >= right.dot(toSite)) ? left : right;
-        return true;
-    }
-
-    if (inwardFromBoundaryEdge(roadPoint, edgeNorm, cell, inward)) {
-        if (setbackInside(roadPoint, inward, setback, cell.boundary)) {
-            return true;
-        }
-        const Vec2 flipped = inward * -1.f;
-        if (setbackInside(roadPoint, flipped, setback, cell.boundary)) {
-            inward = flipped;
-            return true;
+bool segmentIntersectsMainFootprints(const Vec2& a, const Vec2& b, const Town& town) {
+    for (const BuildingInstance& instance : town.buildingInstances) {
+        for (const BuildingFootprint& footprint : instance.footprints) {
+            if (footprint.mainBuilding && segmentIntersectsFootprint(a, b, footprint)) {
+                return true;
+            }
         }
     }
-
-    inward = inwardTowardSite(roadPoint, edgeNorm, cell.site);
-    if (setbackInside(roadPoint, inward, setback, cell.boundary)) {
-        return true;
-    }
-    const Vec2 flipped = inward * -1.f;
-    if (setbackInside(roadPoint, flipped, setback, cell.boundary)) {
-        inward = flipped;
-        return true;
-    }
-
-    inward = flipped;
     return false;
 }
 
-bool orientRoadForCell(const Road& road, int cellId, Vec2& a, Vec2& b, Vec2& edgeDir,
-                       Vec2& inward, const Cell& cell, float /*setback*/) {
-    if (!roadFrameForCell(road, cellId, a, b, edgeDir)) {
-        return false;
+bool segmentIntersectsSecondaryFootprints(const Vec2& a, const Vec2& b, const Town& town) {
+    for (const BuildingInstance& instance : town.buildingInstances) {
+        for (const BuildingFootprint& footprint : instance.footprints) {
+            if (!footprint.mainBuilding && segmentIntersectsFootprint(a, b, footprint)) {
+                return true;
+            }
+        }
     }
+    return false;
+}
 
-    if (const RoadSideFrontage* side = road.sideForCell(cellId)) {
-        if (side->inward.length() > 1e-4f) {
-            inward = side->inward;
+bool alleyCorridorHitsFootprint(const Vec2& a, const Vec2& b, float roadHalfWidth,
+                                const BuildingFootprint& fp) {
+    if (segmentIntersectsFootprint(a, b, fp)) {
+        return true;
+    }
+    for (const Vec2& corner : fp.corners) {
+        if (distancePointToSegment(corner, a, b) <= roadHalfWidth) {
             return true;
         }
     }
-
-    const Vec2 mid  = (road.a + road.b) * 0.5f;
-    const Vec2 left = perpendicular(edgeDir);
-    inward          = (left.dot(cell.site - mid) >= 0.f) ? left : left * -1.f;
-    return true;
+    return false;
 }
 
-void buildRoadPlot(const Vec2& roadStart, const Vec2& edgeDir, const Vec2& inward, float setback,
-                   float frontage, float depth, Plot& plot) {
-    plot.corners[0] = roadStart + inward * setback;
-    plot.corners[1] = plot.corners[0] + edgeDir * frontage;
-    plot.corners[2] = plot.corners[1] + inward * depth;
-    plot.corners[3] = plot.corners[0] + inward * depth;
-    plot.frontage   = frontage;
-    plot.depth      = depth;
-    plot.area       = frontage * depth;
+bool alleySegmentBlocked(const Vec2& a, const Vec2& b, float roadHalfWidth, const Town& town,
+                         const DefCache& defs) {
+    for (const BuildingInstance& instance : town.buildingInstances) {
+        for (const BuildingFootprint& footprint : instance.footprints) {
+            if (alleyCorridorHitsFootprint(a, b, roadHalfWidth, footprint)) {
+                return true;
+            }
+        }
+        if (instance.placementMode != BuildingPlacementMode::PlotLot || instance.plot.id < 0) {
+            continue;
+        }
+        const BuildingDef* def = defs.building(instance.buildingType);
+        if (def == nullptr || def->allowPlotFill) {
+            continue;
+        }
+        if (alleyCorridorHitsFootprint(a, b, roadHalfWidth, plotAsFootprint(instance.plot))) {
+            return true;
+        }
+    }
+    return false;
 }
 
-Vec2 plotCenter(const Plot& plot) {
-    return {(plot.corners[0].x + plot.corners[1].x + plot.corners[2].x + plot.corners[3].x) * 0.25f,
-            (plot.corners[0].y + plot.corners[1].y + plot.corners[2].y + plot.corners[3].y) * 0.25f};
+bool alleySegmentBlockedByMain(const Vec2& a, const Vec2& b, float roadHalfWidth, const Town& town,
+                               const DefCache& defs) {
+    for (const BuildingInstance& instance : town.buildingInstances) {
+        for (const BuildingFootprint& footprint : instance.footprints) {
+            if (!footprint.mainBuilding) {
+                continue;
+            }
+            if (alleyCorridorHitsFootprint(a, b, roadHalfWidth, footprint)) {
+                return true;
+            }
+        }
+        if (instance.placementMode != BuildingPlacementMode::PlotLot || instance.plot.id < 0) {
+            continue;
+        }
+        const BuildingDef* def = defs.building(instance.buildingType);
+        if (def == nullptr || def->allowPlotFill) {
+            continue;
+        }
+        if (alleyCorridorHitsFootprint(a, b, roadHalfWidth, plotAsFootprint(instance.plot))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 namespace {
 
-float cross2D(const Vec2& a, const Vec2& b) { return a.x * b.y - a.y * b.x; }
-
-bool pointInMainFootprint(const Vec2& p, const BuildingFootprint& fp) {
-    return pointInPolygon(p, std::vector<Vec2>{fp.corners[0], fp.corners[1], fp.corners[2],
-                                               fp.corners[3]});
+bool demolitionAlreadyListed(const std::vector<AuxiliaryDemolition>& out, int instanceId,
+                             int footprintLabelId) {
+    for (const AuxiliaryDemolition& entry : out) {
+        if (entry.instanceId == instanceId && entry.footprintLabelId == footprintLabelId) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
 
+void collectAuxiliaryDemolitionsForAlley(const Vec2& a, const Vec2& b, float roadHalfWidth,
+                                         const Town& town, std::vector<AuxiliaryDemolition>& out) {
+    for (const BuildingInstance& instance : town.buildingInstances) {
+        if (instance.placementMode != BuildingPlacementMode::PlotLot) {
+            continue;
+        }
+        for (const BuildingFootprint& footprint : instance.footprints) {
+            if (footprint.mainBuilding) {
+                continue;
+            }
+            if (!alleyCorridorHitsFootprint(a, b, roadHalfWidth, footprint)) {
+                continue;
+            }
+            if (demolitionAlreadyListed(out, instance.id, footprint.labelId)) {
+                continue;
+            }
+            out.push_back({instance.id, footprint.labelId});
+        }
+    }
+}
+
+void applyAuxiliaryDemolitions(Town& town, const std::vector<AuxiliaryDemolition>& demolitions) {
+    for (const AuxiliaryDemolition& demo : demolitions) {
+        for (BuildingInstance& instance : town.buildingInstances) {
+            if (instance.id != demo.instanceId) {
+                continue;
+            }
+            instance.footprints.erase(
+                std::remove_if(instance.footprints.begin(), instance.footprints.end(),
+                               [&](const BuildingFootprint& footprint) {
+                                   return !footprint.mainBuilding
+                                          && footprint.labelId == demo.footprintLabelId;
+                               }),
+                instance.footprints.end());
+            break;
+        }
+    }
+}
+
+bool footprintOverlapsAlleys(const BuildingFootprint& footprint, const Town& town, float setback,
+                             int excludeRoadId) {
+    for (const Road& road : town.roads) {
+        if (!road.isSecondary || road.id == excludeRoadId) {
+            continue;
+        }
+        if (alleyCorridorHitsFootprint(road.a, road.b, setback, footprint)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool plotOverlapsAlleys(const Plot& plot, const Town& town, float setback, int excludeRoadId) {
+    return footprintOverlapsAlleys(plotAsFootprint(plot), town, setback, excludeRoadId);
+}
+
+bool segmentClearsRoadSetback(const Vec2& a, const Vec2& b, const Town& town, int hostRoadId,
+                              float setback, int excludeRoadId) {
+    const Vec2  ab  = b - a;
+    const float len = ab.length();
+    if (len < 1e-3f) {
+        return false;
+    }
+    const Vec2 edgeDir = ab * (1.f / len);
+    const Vec2 left = perpendicular(edgeDir).normalized();
+    for (float t : {0.f, len * 0.5f, len}) {
+        const Vec2 center = a + edgeDir * t;
+        for (float sign : {1.f, -1.f}) {
+            const Vec2 p = center + left * (sign * setback);
+            if (!pointInsideTownDisc(town, p)) {
+                return false;
+            }
+            for (const Road& road : town.roads) {
+                if (road.id == hostRoadId || road.id == excludeRoadId) {
+                    continue;
+                }
+                if (distancePointToSegment(p, road.a, road.b) < setback - 1e-3f) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool segmentsIntersect2D(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1) {
+    float t = 0.f;
+    float u = 0.f;
+    return segmentCrossingParams(a0, a1, b0, b1, t, u);
+}
+
 bool segmentCrossingParams(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1,
-                             float& outT, float& outU) {
+                           float& outT, float& outU) {
     const Vec2  r     = a1 - a0;
     const Vec2  s     = b1 - b0;
     const float denom = r.x * s.y - r.y * s.x;
@@ -766,235 +897,104 @@ bool segmentsCrossInInterior(const Vec2& a0, const Vec2& a1, const Vec2& b0, con
 
 bool segmentParallelOverlapMetrics(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1,
                                    float minParallelCos, float& outMinSep, float& outOverlapLen) {
-    const Vec2  dirA  = a1 - a0;
-    const float lenA  = dirA.length();
-    const Vec2  dirB  = b1 - b0;
-    const float lenB  = dirB.length();
+    const Vec2  dirA = a1 - a0;
+    const Vec2  dirB = b1 - b0;
+    const float lenA = dirA.length();
+    const float lenB = dirB.length();
     if (lenA < 1e-4f || lenB < 1e-4f) {
         return false;
     }
-
     const Vec2 unitA = dirA * (1.f / lenA);
     const Vec2 unitB = dirB * (1.f / lenB);
     if (std::abs(unitA.dot(unitB)) < minParallelCos) {
         return false;
     }
-
-    const auto projectT = [&](const Vec2& p) -> float { return (p - a0).dot(unitA); };
-    const float tb0     = projectT(b0);
-    const float tb1     = projectT(b1);
-    const float bMin    = std::min(tb0, tb1);
-    const float bMax    = std::max(tb0, tb1);
-    const float overlapStart = std::max(0.f, bMin);
-    const float overlapEnd   = std::min(lenA, bMax);
-    outOverlapLen            = std::max(0.f, overlapEnd - overlapStart);
-    if (outOverlapLen <= 1e-4f) {
-        return false;
-    }
-
-    const Vec2 perpA{-unitA.y, unitA.x};
-    outMinSep = std::abs((b0 - a0).dot(perpA));
-    return true;
+    const auto projectT = [&](const Vec2& p) { return (p - a0).dot(unitA); };
+    const float bMin = std::min(projectT(b0), projectT(b1));
+    const float bMax = std::max(projectT(b0), projectT(b1));
+    outOverlapLen = std::max(0.f, std::min(lenA, bMax) - std::max(0.f, bMin));
+    outMinSep = std::abs((b0 - a0).dot(perpendicular(unitA)));
+    return outOverlapLen > 1e-4f;
 }
 
 bool segmentNearParallelRoad(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1,
                              float minParallelCos, float maxSep, float minOverlapFrac) {
-    float minSep      = 0.f;
-    float overlapLen  = 0.f;
+    float minSep = 0.f;
+    float overlapLen = 0.f;
     if (!segmentParallelOverlapMetrics(a0, a1, b0, b1, minParallelCos, minSep, overlapLen)) {
         return false;
     }
-
     const float minLen = std::min((a1 - a0).length(), (b1 - b0).length());
-    if (minLen < 1e-4f) {
-        return false;
-    }
-    return minSep <= maxSep && overlapLen / minLen >= minOverlapFrac;
-}
-
-bool segmentsIntersect2D(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1) {
-    const Vec2 r = a1 - a0;
-    const Vec2 s = b1 - b0;
-    const float denom = cross2D(r, s);
-    const Vec2  qp    = b0 - a0;
-    if (std::abs(denom) < 1e-8f) {
-        return false;
-    }
-    const float t = cross2D(qp, s) / denom;
-    const float u = cross2D(qp, r) / denom;
-    return t >= -1e-4f && t <= 1.f + 1e-4f && u >= -1e-4f && u <= 1.f + 1e-4f;
+    return minSep <= maxSep && minLen > 1e-4f && overlapLen / minLen >= minOverlapFrac;
 }
 
 float raySegmentHitDist(const Vec2& origin, const Vec2& dir, const Vec2& segA, const Vec2& segB,
                         float maxDist) {
-    const Vec2  r     = dir * maxDist;
+    const Vec2  r     = dir;
     const Vec2  s     = segB - segA;
-    const float denom = cross2D(r, s);
+    const float denom = r.x * s.y - r.y * s.x;
     if (std::abs(denom) < 1e-8f) {
         return -1.f;
     }
-    const Vec2  qp    = segA - origin;
-    const float t     = cross2D(qp, s) / denom;
-    const float u     = cross2D(qp, r) / denom;
-    if (t < 1e-4f || t > 1.f + 1e-4f || u < -1e-4f || u > 1.f + 1e-4f) {
+    const Vec2 qp = segA - origin;
+    const float t = (qp.x * s.y - qp.y * s.x) / denom;
+    const float u = (qp.x * r.y - qp.y * r.x) / denom;
+    if (t < 0.f || t > maxDist || u < -1e-4f || u > 1.f + 1e-4f) {
         return -1.f;
     }
-    return t * maxDist;
+    return t;
 }
 
 namespace {
 
-bool segmentIntersectsFootprint(const Vec2& a, const Vec2& b, const BuildingFootprint& fp) {
-    for (int i = 0; i < 4; ++i) {
-        const Vec2& c0 = fp.corners[i];
-        const Vec2& c1 = fp.corners[(i + 1) % 4];
-        if (segmentsIntersect2D(a, b, c0, c1)) {
-            return true;
+constexpr float kPi = 3.14159265358979323846f;
+
+float nearestRoadRayDist(const Town& town, const Vec2& origin, const Vec2& dir, float maxDist,
+                           const std::unordered_set<int>& excludeRoadIds) {
+    float best = maxDist + 1.f;
+    for (const Road& road : town.roads) {
+        if (excludeRoadIds.count(road.id) != 0) {
+            continue;
+        }
+        const float hit = raySegmentHitDist(origin, dir, road.a, road.b, maxDist);
+        if (hit > 1e-3f && hit < best) {
+            best = hit;
         }
     }
-    const Vec2 mid = (a + b) * 0.5f;
-    if (pointInMainFootprint(mid, fp)) {
-        return true;
-    }
-    return false;
-}
-
-float distancePointToSegment(const Vec2& p, const Vec2& a, const Vec2& b) {
-    const Vec2  ab    = b - a;
-    const float lenSq = ab.dot(ab);
-    if (lenSq < 1e-8f) {
-        return (p - a).length();
-    }
-    const float t = std::clamp((p - a).dot(ab) / lenSq, 0.f, 1.f);
-    const Vec2  closest = a + ab * t;
-    return (p - closest).length();
-}
-
-float segmentSegmentMinDistance(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1) {
-    if (segmentsIntersect2D(a0, a1, b0, b1)) {
-        return 0.f;
-    }
-    return std::min(
-        {distancePointToSegment(a0, b0, b1), distancePointToSegment(a1, b0, b1),
-         distancePointToSegment(b0, a0, a1), distancePointToSegment(b1, a0, a1)});
-}
-
-bool alleyCorridorHitsFootprint(const Vec2& a, const Vec2& b, float halfWidth,
-                                const BuildingFootprint& fp) {
-    if (segmentIntersectsFootprint(a, b, fp)) {
-        return true;
-    }
-    for (int i = 0; i < 4; ++i) {
-        if (distancePointToSegment(fp.corners[i], a, b) <= halfWidth + 1e-3f) {
-            return true;
-        }
-        const Vec2& c0 = fp.corners[i];
-        const Vec2& c1 = fp.corners[(i + 1) % 4];
-        if (segmentSegmentMinDistance(a, b, c0, c1) <= halfWidth + 1e-3f) {
-            return true;
-        }
-    }
-    return false;
+    return best;
 }
 
 }  // namespace
 
-bool segmentIntersectsMainFootprints(const Vec2& a, const Vec2& b, const Town& town) {
-    for (const BuildingInstance& instance : town.buildingInstances) {
-        for (const BuildingFootprint& footprint : instance.footprints) {
-            if (!footprint.mainBuilding) {
-                continue;
-            }
-            if (segmentIntersectsFootprint(a, b, footprint)) {
-                return true;
-            }
-        }
+bool minSideRoadClearanceAlongSegment(const Town& town, const Vec2& a, const Vec2& b,
+                                      int hostRoadId, int destRoadId, float minDist,
+                                      int sampleCount, float setback) {
+    if (minDist <= 1e-3f) {
+        return true;
     }
-    return false;
-}
 
-bool segmentIntersectsSecondaryFootprints(const Vec2& a, const Vec2& b, const Town& town) {
-    for (const BuildingInstance& instance : town.buildingInstances) {
-        for (const BuildingFootprint& footprint : instance.footprints) {
-            if (footprint.mainBuilding) {
-                continue;
-            }
-            if (segmentIntersectsFootprint(a, b, footprint)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool alleySegmentBlocked(const Vec2& a, const Vec2& b, float roadHalfWidth, const Town& town,
-                         const DefCache& defs) {
-    for (const BuildingInstance& instance : town.buildingInstances) {
-        for (const BuildingFootprint& footprint : instance.footprints) {
-            if (alleyCorridorHitsFootprint(a, b, roadHalfWidth, footprint)) {
-                return true;
-            }
-        }
-
-        if (instance.placementMode != BuildingPlacementMode::PlotLot || instance.plot.id < 0) {
-            continue;
-        }
-        const BuildingDef* def = defs.building(instance.buildingType);
-        if (def == nullptr || def->allowPlotFill) {
-            continue;
-        }
-
-        BuildingFootprint plotFootprint{};
-        for (int i = 0; i < 4; ++i) {
-            plotFootprint.corners[i] = instance.plot.corners[i];
-        }
-        if (alleyCorridorHitsFootprint(a, b, roadHalfWidth, plotFootprint)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool footprintOverlapsAlleys(const BuildingFootprint& footprint, const Town& town, float setback,
-                             int excludeRoadId) {
-    for (const Road& road : town.roads) {
-        if (!road.isSecondary || road.id == excludeRoadId) {
-            continue;
-        }
-        if (alleyCorridorHitsFootprint(road.a, road.b, setback, footprint)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool plotOverlapsAlleys(const Plot& plot, const Town& town, float setback, int excludeRoadId) {
-    BuildingFootprint footprint{};
-    for (int i = 0; i < 4; ++i) {
-        footprint.corners[i] = plot.corners[i];
-    }
-    return footprintOverlapsAlleys(footprint, town, setback, excludeRoadId);
-}
-
-bool segmentClearsRoadSetback(const Vec2& a, const Vec2& b, const Town& town, int hostCellId,
-                              float setback, int excludeRoadId) {
-    if (hostCellId < 0 || hostCellId >= static_cast<int>(town.cells.size())) {
+    const Vec2  ab  = b - a;
+    const float len = ab.length();
+    if (len < setback * 2.f + 1e-3f) {
         return false;
     }
-    const Cell& cell = town.cells[static_cast<std::size_t>(hostCellId)];
-    const Vec2  ab   = b - a;
-    const float len  = ab.length();
-    if (len < 1e-3f) {
-        return false;
-    }
-    const Vec2  edgeDir = ab * (1.f / len);
-    const Vec2  left    = perpendicular(edgeDir);
-    const float samples[] = {0.f, len * 0.5f, len};
-    for (const float t : samples) {
-        const Vec2 center = a + edgeDir * t;
-        for (const int sign : {1, -1}) {
-            const Vec2 inward = (left * static_cast<float>(sign)).normalized();
-            if (!validSetbackProbe(center, inward, setback, cell, town.roads, excludeRoadId)) {
+
+    const Vec2 dir  = ab * (1.f / len);
+    const Vec2 perp = perpendicular(dir).normalized();
+    const int  samples = std::max(2, sampleCount);
+    const float maxRay = std::max(len * 2.f, 128.f);
+
+    std::unordered_set<int> exclude;
+    exclude.insert(hostRoadId);
+    exclude.insert(destRoadId);
+
+    for (int i = 0; i < samples; ++i) {
+        const float u = static_cast<float>(i + 1) / static_cast<float>(samples + 1);
+        const Vec2  point = a + dir * (len * u);
+        for (float sign : {1.f, -1.f}) {
+            const float sideDist =
+                nearestRoadRayDist(town, point, perp * sign, maxRay, exclude);
+            if (sideDist < minDist) {
                 return false;
             }
         }
@@ -1002,3 +1002,138 @@ bool segmentClearsRoadSetback(const Vec2& a, const Vec2& b, const Town& town, in
     return true;
 }
 
+float alleyCrossingAngleDeg(const Town& town, const Vec2& segmentStart, const Vec2& segmentEnd,
+                            int destRoadId) {
+    if (destRoadId < 0 || destRoadId >= static_cast<int>(town.roads.size())) {
+        return 0.f;
+    }
+    const Road& road    = town.roads[static_cast<std::size_t>(destRoadId)];
+    const Vec2  alleyDir = (segmentEnd - segmentStart).normalized();
+    const Vec2  roadDir  = (road.b - road.a).normalized();
+    if (alleyDir.length() < 1e-4f || roadDir.length() < 1e-4f) {
+        return 0.f;
+    }
+    float dot = std::abs(alleyDir.dot(roadDir));
+    dot       = std::min(1.f, std::max(0.f, dot));
+    return std::acos(dot) * 180.f / kPi;
+}
+
+bool alleyCrossingAngleOk(const Town& town, const Vec2& segmentStart, const Vec2& segmentEnd,
+                          int destRoadId, float minAngleDeg) {
+    if (minAngleDeg <= 1e-3f) {
+        return true;
+    }
+    return alleyCrossingAngleDeg(town, segmentStart, segmentEnd, destRoadId) >= minAngleDeg;
+}
+
+bool alleyEndpointTooClose(const Town& town, const Vec2& start, const Vec2& end, float minSpacing) {
+    if (minSpacing <= 1e-3f) {
+        return false;
+    }
+
+    constexpr float kCoincident = 0.15f;
+
+    const auto tooClose = [&](const Vec2& endpoint, const Vec2& other) {
+        const float dist = (endpoint - other).length();
+        return dist >= kCoincident && dist < minSpacing;
+    };
+
+    for (const Junction& junction : town.junctions) {
+        if (tooClose(start, junction.pos) || tooClose(end, junction.pos)) {
+            return true;
+        }
+    }
+
+    for (const Road& road : town.roads) {
+        if (!road.isSecondary) {
+            continue;
+        }
+        if (tooClose(start, road.a) || tooClose(start, road.b) || tooClose(end, road.a)
+            || tooClose(end, road.b)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool alleyBankDirectionOk(const Town& town, const WallGap& gap, const Vec2& alleyDir,
+                          float minSepDeg) {
+    if (minSepDeg <= 1e-3f) {
+        return true;
+    }
+    if (alleyDir.length() < 1e-4f) {
+        return true;
+    }
+
+    const Vec2  dNew   = alleyDir.normalized();
+    const float maxDot = std::cos(minSepDeg * kPi / 180.f);
+
+    for (const SecondaryRoadRecord& rec : town.secondaryRoadRecords) {
+        if (rec.hostRoadId != gap.roadId || rec.hostBankIndex != gap.bankIndex) {
+            continue;
+        }
+        const Vec2 seg = rec.b - rec.a;
+        if (seg.length() < 1e-4f) {
+            continue;
+        }
+        const Vec2 dExisting = seg.normalized();
+        if (std::abs(dNew.dot(dExisting)) > maxDot) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validateAlleyProbe(const Town& town, const AlleyProbeCandidate& probe, const TownConfig& cfg,
+                        float setback, AlleyQualityReject* outReject) {
+    if (probe.segments.empty()) {
+        if (outReject != nullptr) {
+            *outReject = AlleyQualityReject::ThinSide;
+        }
+        return false;
+    }
+
+    const int hostRoadId = probe.gap.roadId;
+
+    for (const AlleySegmentCandidate& segment : probe.segments) {
+        if (!minSideRoadClearanceAlongSegment(town, segment.start, segment.end, hostRoadId,
+                                              segment.destRoadId, cfg.minAlleySideRoadDist,
+                                              cfg.alleySideRoadSampleCount, setback)) {
+            if (outReject != nullptr) {
+                *outReject = AlleyQualityReject::ThinSide;
+            }
+            return false;
+        }
+    }
+
+    const AlleySegmentCandidate& terminal = probe.segments.back();
+    if (terminal.destRoadId >= 0
+        && !alleyCrossingAngleOk(town, terminal.start, terminal.end, terminal.destRoadId,
+                                 cfg.minAlleyCrossingAngleDeg)) {
+        if (outReject != nullptr) {
+            *outReject = AlleyQualityReject::BadAngle;
+        }
+        return false;
+    }
+
+    if (alleyEndpointTooClose(town, probe.segments.front().start, probe.segments.back().end,
+                              cfg.minAlleyEndpointSpacing)) {
+        if (outReject != nullptr) {
+            *outReject = AlleyQualityReject::EndpointSpacing;
+        }
+        return false;
+    }
+
+    if (!alleyBankDirectionOk(town, probe.gap, probe.probeDir, cfg.minAlleyBankAngleSepDeg)) {
+        if (outReject != nullptr) {
+            *outReject = AlleyQualityReject::BankParallel;
+        }
+        return false;
+    }
+
+    if (outReject != nullptr) {
+        *outReject = AlleyQualityReject::None;
+    }
+    return true;
+}

@@ -1,6 +1,5 @@
 #include "Logger.h"
 
-#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -9,12 +8,16 @@ std::mutex Logger::mutex_;
 std::filesystem::path Logger::logDirectory_;
 std::unordered_map<std::string, std::ofstream> Logger::streams_;
 std::string Logger::defaultChannel_ = "app";
-bool Logger::warnedUnknownChannel_ = false;
+bool Logger::warnedUnknownChannel_  = false;
+int Logger::flushIntervalMs_        = 2000;
+std::chrono::steady_clock::time_point Logger::lastFlushTime_ = std::chrono::steady_clock::now();
 
 void Logger::init(const Config& config, const std::filesystem::path& projectRoot) {
     std::lock_guard<std::mutex> lock(mutex_);
     streams_.clear();
     warnedUnknownChannel_ = false;
+    flushIntervalMs_      = config.logging.flushIntervalMs;
+    lastFlushTime_        = std::chrono::steady_clock::now();
 
     logDirectory_ = projectRoot / config.logging.directory;
     if (std::filesystem::exists(logDirectory_)) {
@@ -74,6 +77,26 @@ std::ofstream& Logger::streamFor(const std::string& channel) {
     return nullStream;
 }
 
+void Logger::flushAllUnlocked() {
+    for (auto& [_, stream] : streams_) {
+        if (stream.is_open()) {
+            stream.flush();
+        }
+    }
+    lastFlushTime_ = std::chrono::steady_clock::now();
+}
+
+void Logger::maybeFlushUnlocked() {
+    if (flushIntervalMs_ <= 0) {
+        return;
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - lastFlushTime_);
+    if (elapsed.count() >= flushIntervalMs_) {
+        flushAllUnlocked();
+    }
+}
+
 void Logger::log(const std::string& channel, const std::string& message) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto& stream = streamFor(channel);
@@ -81,11 +104,17 @@ void Logger::log(const std::string& channel, const std::string& message) {
         return;
     }
     stream << timestamp() << " [" << channel << "] " << message << '\n';
-    stream.flush();
+    maybeFlushUnlocked();
+}
+
+void Logger::flush() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    flushAllUnlocked();
 }
 
 void Logger::shutdown() {
     std::lock_guard<std::mutex> lock(mutex_);
+    flushAllUnlocked();
     for (auto& [_, stream] : streams_) {
         if (stream.is_open()) {
             stream.close();

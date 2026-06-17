@@ -12,12 +12,9 @@ int  frontPendingAlleyIndex(const Town& town, int failLimit);
 int  pendingAlleyIndexByQueueIndex(const Town& town, int addedAtQueueIndex);
 void recordAlleyFillSuccess(Town& town, int pendingIndex);
 void recordAlleyFillFailure(Town& town, int pendingIndex, int failLimit);
-void enqueuePendingAlleyFill(Town& town, int addedAtQueueIndex, int hostCellId);
-void ensureActiveAlleyCell(Town& town, float setback, const TownConfig& townCfg);
-int  pickAlternateAlleyCell(Town& town, float setback, const TownConfig& townCfg,
-                              int excludeCellId);
+void enqueuePendingAlleyFill(Town& town, int addedAtQueueIndex, int hostRoadId);
 
 bool tryAddSecondaryRoad(Town& town, int queueIndex, float setback, const TownConfig& townCfg,
                          const DefCache& defs, PlacementSearchLog& searchLog, int& outRoadId,
-                         int forceCellId = -1);
+                         int forceRoadId, const std::vector<int>& junctionHops, int townSeed);
 bool removeAlleysThroughSecondaryBuildings(Town& town);

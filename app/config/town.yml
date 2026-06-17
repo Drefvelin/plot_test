@@ -1,22 +1,22 @@
 # Target building counts for a fully grown town.
-# segment_gap_fill_count: last N growth-queue indices use dense segment gap-fill
-# (house/workshop mains only; church/farm/resource in that range still get plots).
-segment_gap_fill_count: 880
+# initial_suburban_max_hops: starting suburban ring (hops 0..N from centre); rural is hop > N.
+initial_suburban_max_hops: 2
 min_wall_gap_for_alley: 4.0   # min gap between main-building fronts (road corridor = 2× setback)
 min_alley_length: 20.0
 max_alley_angle_deg: 20.0
 alleys_per_unit_length: 0.25   # probe positions along each gap = width × this value
 alley_angle_count: 5          # evenly spaced angles within ±max_alley_angle_deg
 min_alley_crossing_angle_deg: 80.0  # reject X-like alley crossings sharper than this
-min_alley_endpoint_spacing: 20.0     # min distance between alley starts/ends in the same cell
-min_alley_created_area: 100.0        # min quadrilateral area opened between source gap and dest road
-min_alley_side_road_dist: 5.0        # min perpendicular distance to another road on each alley side
+min_alley_bank_angle_sep_deg: 25.0  # min angle between alleys on same host bank (parallel or anti-parallel)
+min_alley_endpoint_spacing: 20.0     # min distance between alley starts/ends on the road graph
+# min_alley_created_area: reserved, not implemented
+min_alley_side_road_dist: 5.0        # spawn inset from wall gap + min perpendicular road clearance on each alley side
 alley_side_road_sample_count: 5      # interior samples along alley for side-road clearance
 alley_fill_fail_limit: 5             # consecutive failed fill attempts before alley is abandoned
 
 buildings:
-  house: 915
-  church: 5
+  house: 85
+  church: 2
   workshop: 60
   resource: 15
   farm: 25

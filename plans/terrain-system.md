@@ -53,7 +53,7 @@ Terrain PNG + terrain.txt
    Placement hooks
         ├── Hard reject in footprint validation
         ├── Soft score in zone / segment scoring
-        ├── Cell-level tags at town build time
+        ├── Road/segment terrain sampling for scoring
         └── Feature-anchor placement (mills, docks, mines)
 ```
 
@@ -66,8 +66,8 @@ See [AGENTS.md](../AGENTS.md) for scale details.
 ## What exists today
 
 - `app/config/terrain.txt` — colour definitions only; **not loaded by the app**
-- Placement uses Voronoi cells + zone types (`urban`, `residential`, `rural`) via `FrontageZones.cpp`
-- No terrain influence on roads, bridges, or feature-anchored buildings yet
+- Placement uses road-bank frontage + zone types (`urban`, `residential`, `rural`) via `FrontageZones.cpp`
+- Terrain hard rejects are in placement validation; feature-anchored buildings are still future work
 
 ## Non-goals (for initial phases)
 

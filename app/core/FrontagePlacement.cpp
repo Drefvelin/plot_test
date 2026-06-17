@@ -2,9 +2,13 @@
 
 #include "BuildingLayout.h"
 #include "FrontageZones.h"
+#include "GrowthRings.h"
 #include "Logger.h"
 #include "PlotDimensions.h"
 #include "PlotGeometry.h"
+#include "RoadExhaustion.h"
+#include "Profile.h"
+#include "TerrainAtlas.h"
 
 #include <algorithm>
 #include <cmath>
@@ -67,13 +71,13 @@ struct SegmentPlacementResult {
     int             tries        = 0;
 };
 
-SegmentPlacementResult trySegmentPositions(const Town& town, const FrontageSlot& slot,
+SegmentPlacementResult trySegmentPositions(Town& town, const FrontageSlot& slot,
                                            const std::string& buildingType, const DefCache& defs,
                                            const PlotConfig& plots, const Vec2& origin,
                                            const Vec2& edgeDir, const Vec2& sideInward,
-                                           const Cell& cell, float targetArea,
-                                           const PlotOrientation* orientOrder, int buildingId,
-                                           const Vec2& sortCenter,
+                                           float targetArea, const PlotOrientation* orientOrder,
+                                           int buildingId, const Vec2& sortCenter,
+                                           const TerrainAtlas* terrain,
                                            const SizeBand* plotAreaBand = nullptr) {
     SegmentPlacementResult result;
     const float minFrontage =
@@ -98,7 +102,8 @@ SegmentPlacementResult trySegmentPositions(const Town& town, const FrontageSlot&
             const Vec2            roadStart = origin + edgeDir * t;
             PlotDimensions        dims      = computePlotDimensionsForRoad(
                 defs, buildingType, targetArea, orient, roadStart, edgeDir, roomFront, sideInward,
-                cell, plots.maxDepthToFrontRatio, plots.frontageSetback, &reject, plotAreaBand);
+                slot.roadId, slot.bankIndex, town, plots.maxDepthToFrontRatio, plots.frontageSetback,
+                &reject, plotAreaBand);
             ++result.tries;
 
             if (!dims.valid || dims.frontage > roomFront + 1e-3f) {
@@ -106,27 +111,34 @@ SegmentPlacementResult trySegmentPositions(const Town& town, const FrontageSlot&
                 const SizeBand* band = defs.sizeBandForBuilding(buildingType);
                 if (band) {
                     const float probeFront = std::min(roomFront, std::sqrt(band->maxArea));
-                    result.lastDepthCap    = maxPlotDepthInCell(roadStart, edgeDir, probeFront,
-                                                                sideInward, plots.frontageSetback,
-                                                                cell);
+                    result.lastDepthCap    = maxPlotDepthToRoadHit(
+                        roadStart, edgeDir, probeFront, sideInward, plots.frontageSetback,
+                        slot.roadId, slot.bankIndex, town);
                 }
                 continue;
             }
 
             Plot candidate{};
             candidate.id       = buildingId;
-            candidate.cellId = slot.cellId;
             candidate.roadId = slot.roadId;
             candidate.roadBank = slot.bankIndex;
             buildRoadPlot(roadStart, edgeDir, sideInward, plots.frontageSetback, dims.frontage,
                           dims.depth, candidate);
 
-            if (!plotInsideCell(candidate, cell)) {
-                result.failReason = "outside_cell";
-                result.lastReject = DimReject::DepthExceedsCell;
-                result.lastDepthCap =
-                    maxPlotDepthInCell(roadStart, edgeDir, dims.frontage, sideInward,
-                                       plots.frontageSetback, cell);
+            if (terrain != nullptr && terrain->valid
+                && !polygonBuildable(candidate.corners, *terrain)) {
+                result.failReason = "terrain_forbidden";
+                logSegmentProbe(buildingId, slot, result.failReason, DimReject::None, -1.f,
+                                dims.frontage, dims.area, t);
+                continue;
+            }
+
+            if (!plotPlacementValid(candidate, town, terrain, plots.frontageSetback, slot.roadId)) {
+                result.failReason = "invalid_plot";
+                result.lastReject = DimReject::DepthExceedsRoadHit;
+                result.lastDepthCap = maxPlotDepthToRoadHit(
+                    roadStart, edgeDir, dims.frontage, sideInward, plots.frontageSetback,
+                    slot.roadId, slot.bankIndex, town);
                 logSegmentProbe(buildingId, slot, result.failReason, result.lastReject,
                                 result.lastDepthCap, dims.frontage, dims.area, t);
                 continue;
@@ -163,18 +175,24 @@ SegmentPlacementResult trySegmentPositions(const Town& town, const FrontageSlot&
 
 void collectFrontageSlots(const Town& town, const DefCache& defs,
                           const std::string& buildingType, float townGrowth,
-                          std::vector<FrontageSlot>& out, int roadFilter) {
+                          std::vector<FrontageSlot>& out, const BandFilter& bandFilter,
+                          int roadFilter, bool skipPlotExhaustedBanks) {
     out.clear();
-    const char*              zone = zoneTypeForBuilding(defs, buildingType);
-    const std::vector<int>   junctionHops = computeJunctionHopDistances(town);
-
+    const char* zone = zoneTypeForBuilding(defs, buildingType);
     for (const Road& road : town.roads) {
         if (roadFilter >= 0 && road.id != roadFilter) {
             continue;
         }
+        if (bandFilter.enabled) {
+            const float dist = roadMidpointCenterDist(town, road);
+            if (!distInFilter(dist, bandFilter)) {
+                continue;
+            }
+        }
         for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
             const RoadSideFrontage* side = road.sideBank(bankIndex);
-            if (side->cellId < 0) {
+            if (skipPlotExhaustedBanks
+                && bankPlotExhaustedVerified(town, road.id, bankIndex)) {
                 continue;
             }
             for (const RoadFrontageSegment& segment : side->segments) {
@@ -184,12 +202,11 @@ void collectFrontageSlots(const Town& town, const DefCache& defs,
                 FrontageSlot slot;
                 slot.segmentId  = segment.id;
                 slot.roadId     = road.id;
-                slot.cellId     = side->cellId;
                 slot.bankIndex  = bankIndex;
                 slot.startT     = segment.startT;
                 slot.endT       = segment.endT;
                 slot.centerDist = segment.centerDist;
-                slot.zoneScore  = scoreSegmentForZone(town, slot, zone, townGrowth, junctionHops);
+                slot.zoneScore  = scoreSegmentForZone(town, slot, zone, townGrowth);
                 out.push_back(slot);
             }
         }
@@ -209,133 +226,149 @@ void collectFrontageSlots(const Town& town, const DefCache& defs,
 }
 
 bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCache& defs,
-                      const PlotConfig& plots, BuildingInstance& out, float targetArea,
+                      const PlotConfig& plots, BuildingInstance& out, const PlacementPrep& prep,
                       int townSeed, int maxBuildings, PlacementSearchLog& searchLog,
-                      int roadFilter, bool useCellCentroid) {
-    PlotOrientation orientFirst  = PlotOrientation::Horizontal;
-    PlotOrientation orientSecond = PlotOrientation::Vertical;
-    sampleOrientationOrder(out.id, townSeed, orientFirst, orientSecond);
-    const PlotOrientation orientOrder[2] = {orientFirst, orientSecond};
-
-    const PlotAreaBand plotAreaRange = computePlotAreaBand(defs, buildingType, out.id, townSeed);
-    SizeBand           plotAreaBand;
-    plotAreaBand.name    = "plot";
-    plotAreaBand.minArea = plotAreaRange.minArea;
-    plotAreaBand.maxArea = plotAreaRange.maxArea;
-    const std::vector<ResolvedBuildingSpec> buildingSpecs =
-        resolveBuildingSpecs(defs, buildingType, out.id, townSeed);
-
-    const float townGrowth =
-        maxBuildings > 0
-            ? static_cast<float>(town.buildingInstances.size()) / static_cast<float>(maxBuildings)
-            : 0.f;
-    const char* zone     = zoneTypeForBuilding(defs, buildingType);
-    const float zoneBias = zoneBiasForType(zone, townGrowth);
+                      const TerrainAtlas* terrain, const BandFilter& bandFilter, int roadFilter) {
+    PROFILE_SCOPE(ProfileScopeId::PlacePlot);
+    const PlotOrientation orientOrder[2] = {prep.orientFirst, prep.orientSecond};
 
     searchLog.buildingId   = out.id;
     searchLog.buildingType = buildingType;
-    searchLog.targetArea   = targetArea;
-    searchLog.orientFirst  = orientFirst;
+    searchLog.targetArea   = prep.targetArea;
+    searchLog.orientFirst  = prep.orientFirst;
     searchLog.totalValid   = 0;
-    searchLog.townGrowth   = townGrowth;
-    searchLog.zoneBias     = zoneBias;
-    searchLog.zoneType     = zone;
+    searchLog.townGrowth   = prep.townGrowth;
+    searchLog.zoneBias     = prep.zoneBias;
+    searchLog.zoneType     = prep.zoneType;
+
+    const bool logProbes = roadFilter < 0;
 
     std::vector<FrontageSlot> slots;
-    collectFrontageSlots(town, defs, buildingType, townGrowth, slots, roadFilter);
+    collectFrontageSlots(town, defs, buildingType, prep.townGrowth, slots, bandFilter, roadFilter);
 
     for (const FrontageSlot& slot : slots) {
         if (slot.roadId < 0 || slot.roadId >= static_cast<int>(town.roads.size())) {
-            continue;
-        }
-        if (slot.cellId < 0 || slot.cellId >= static_cast<int>(town.cells.size())) {
             continue;
         }
 
         ++searchLog.slotsExamined;
 
         const Road& road = town.roads[static_cast<std::size_t>(slot.roadId)];
-        const Cell& cell = town.cells[static_cast<std::size_t>(slot.cellId)];
-        const float centDist = (cell.centroid - town.center).length();
-        CellSearchStats& cellStats = statsFor(searchLog, slot.cellId, centDist);
+        RoadSearchStats& roadStats = statsFor(searchLog, slot.roadId, slot.centerDist);
 
-        const RoadSideFrontage* sideData = road.sideForPlacement(slot.cellId, slot.bankIndex);
+        const RoadSideFrontage* sideData = road.sideBank(slot.bankIndex);
         if (sideData == nullptr || sideData->inward.length() < 1e-4f) {
             ++searchLog.noInwardSkipped;
-            logSegmentProbe(out.id, slot, "no_inward");
+            if (logProbes) {
+                logSegmentProbe(out.id, slot, "no_inward");
+            }
             continue;
         }
         if (slot.zoneScore > 1e8f) {
             ++searchLog.zoneFiltered;
-            logSegmentProbe(out.id, slot, "zone_inner");
+            if (logProbes) {
+                logSegmentProbe(out.id, slot, "zone_inner");
+            }
             continue;
         }
 
         Vec2 a{};
         Vec2 b{};
         Vec2 edgeDir{};
-        if (!roadFrameForCell(road, slot.cellId, a, b, edgeDir)) {
+        if (!roadFrameForBank(road, slot.bankIndex, a, b, edgeDir)) {
             ++searchLog.orientFailedSkipped;
-            logSegmentProbe(out.id, slot, "orient_failed");
+            if (logProbes) {
+                logSegmentProbe(out.id, slot, "orient_failed");
+            }
             continue;
         }
 
-        ++cellStats.roadsChecked;
+        ++roadStats.roadsChecked;
 
-        const Vec2 sortCenter = useCellCentroid ? cell.centroid : town.center;
+        const Vec2 sortCenter = town.center;
         const SegmentPlacementResult attempt = trySegmentPositions(
-            town, slot, buildingType, defs, plots, a, edgeDir, sideData->inward, cell, targetArea,
-            orientOrder, out.id, sortCenter, &plotAreaBand);
+            town, slot, buildingType, defs, plots, a, edgeDir, sideData->inward, prep.targetArea,
+            orientOrder, out.id, sortCenter, terrain, &prep.plotAreaBand);
 
         if (!attempt.placed) {
             ++searchLog.dimFailedSegments;
-            recordDimReject(cellStats, attempt.lastReject);
+            recordDimReject(roadStats, attempt.lastReject);
             const float frontageNeed =
                 bandMinFrontage(defs, buildingType, slot.width(), plots.maxDepthToFrontRatio);
-            logSegmentProbe(out.id, slot, attempt.failReason, attempt.lastReject,
-                            attempt.lastDepthCap, frontageNeed, -1.f);
-            Logger::log("probe", "segment_slide: placement #" + std::to_string(out.id) + " seg="
-                                     + std::to_string(slot.segmentId) + " tries="
-                                     + std::to_string(attempt.tries) + " result="
-                                     + attempt.failReason);
+            if (logProbes) {
+                logSegmentProbe(out.id, slot, attempt.failReason, attempt.lastReject,
+                                attempt.lastDepthCap, frontageNeed, -1.f);
+                Logger::log("probe", "segment_slide: placement #" + std::to_string(out.id) + " seg="
+                                         + std::to_string(slot.segmentId) + " tries="
+                                         + std::to_string(attempt.tries) + " result="
+                                         + attempt.failReason);
+            }
             continue;
         }
 
-        logSegmentProbe(out.id, slot, "placed", DimReject::None, attempt.dims.depth,
-                        attempt.dims.frontage, attempt.dims.area, attempt.slotT);
+        if (logProbes) {
+            logSegmentProbe(out.id, slot, "placed", DimReject::None, attempt.dims.depth,
+                            attempt.dims.frontage, attempt.dims.area, attempt.slotT);
+        }
 
         out.id            = attempt.plot.id;
         out.buildingType  = buildingType;
         out.placementMode = BuildingPlacementMode::PlotLot;
-        out.roadId        = -1;
-        out.cellId        = -1;
-        out.roadBank      = -1;
+        out.roadId        = slot.roadId;
+        out.roadBank      = slot.bankIndex;
         out.plot          = attempt.plot;
-        if (road.isSameCellSecondary()) {
-            out.plot.roadBank = slot.bankIndex;
-            out.roadBank      = slot.bankIndex;
-        }
-        if (!layoutBuildingsOnPlot(out.plot, town, buildingSpecs, out.id, townSeed, out.footprints)) {
+        if (!layoutBuildingsOnPlot(out.plot, town, prep.buildingSpecs, out.id, townSeed,
+                                   out.footprints)) {
             ++searchLog.dimFailedSegments;
-            logSegmentProbe(out.id, slot, "layout_main_failed", DimReject::None, -1.f, -1.f, -1.f);
-            Logger::log("probe", "segment_slide: placement #" + std::to_string(out.id) + " seg="
-                                     + std::to_string(slot.segmentId)
-                                     + " result=layout_main_failed (plot fits but main building "
-                                       "footprint does not)");
+            if (logProbes) {
+                logSegmentProbe(out.id, slot, "layout_main_failed", DimReject::None, -1.f, -1.f, -1.f);
+                Logger::log("probe", "segment_slide: placement #" + std::to_string(out.id) + " seg="
+                                         + std::to_string(slot.segmentId)
+                                         + " result=layout_main_failed (plot fits but main building "
+                                           "footprint does not)");
+            }
             continue;
         }
 
-        ++cellStats.valid;
-        ++searchLog.totalValid;
-        cellStats.bestValidDist = std::min(
-            cellStats.bestValidDist, (plotCenter(attempt.plot) - town.center).length());
+        bool footprintTerrainOk = true;
+        for (const BuildingFootprint& footprint : out.footprints) {
+            if (footprintPlacementValid(footprint, town, terrain, plots.frontageSetback,
+                                        slot.roadId)) {
+                continue;
+            }
+            if (terrain != nullptr && terrain->valid
+                && !polygonBuildable(footprint.corners, *terrain)) {
+                if (logProbes) {
+                    logSegmentProbe(out.id, slot, "terrain_forbidden", DimReject::None, -1.f, -1.f,
+                                    -1.f);
+                }
+                Logger::log("layout",
+                            "terrain_reject: queueIndex=" + std::to_string(out.id) + " road="
+                                + std::to_string(slot.roadId) + " reason=footprint");
+            } else if (logProbes) {
+                logSegmentProbe(out.id, slot, "layout_main_failed", DimReject::None, -1.f, -1.f,
+                                -1.f);
+            }
+            footprintTerrainOk = false;
+            break;
+        }
+        if (!footprintTerrainOk) {
+            ++searchLog.dimFailedSegments;
+            out.footprints.clear();
+            continue;
+        }
 
-        searchLog.layoutRequested = static_cast<int>(buildingSpecs.size());
+        ++roadStats.valid;
+        ++searchLog.totalValid;
+        roadStats.bestValidDist = std::min(
+            roadStats.bestValidDist, (plotCenter(attempt.plot) - town.center).length());
+
+        searchLog.layoutRequested = static_cast<int>(prep.buildingSpecs.size());
         searchLog.layoutPlaced  = static_cast<int>(out.footprints.size());
 
         carveRoadFrontageForPlot(town, attempt.plot, plots.frontageSetback);
 
-        searchLog.chosenCell      = slot.cellId;
+        searchLog.chosenRoadCandidate = slot.roadId;
         searchLog.chosenRoad      = slot.roadId;
         searchLog.chosenSegment   = slot.segmentId;
         searchLog.chosenZoneScore = slot.zoneScore;
@@ -346,8 +379,8 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
         searchLog.chosenOrient    = attempt.orient;
         searchLog.chosenCenter    = plotCenter(attempt.plot);
         searchLog.resultSummary =
-            "first_valid_segment_in_zone_order seg=" + std::to_string(slot.segmentId) + " cell="
-            + std::to_string(slot.cellId) + " road=" + std::to_string(slot.roadId)
+            "first_valid_segment_in_zone_order seg=" + std::to_string(slot.segmentId) + " road="
+            + std::to_string(slot.roadId)
             + " zone_score=" + fmt1(slot.zoneScore) + " center_dist=" + fmt1(slot.centerDist)
             + " orient=" + orientationName(attempt.orient)
             + (searchLog.layoutPlaced < searchLog.layoutRequested

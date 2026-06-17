@@ -1,80 +1,37 @@
 #include "SecondaryRoadPlacement.h"
 
-#include "DefCache.h"
+#include "FrontageZones.h"
+
 #include "Logger.h"
 #include "PlotGeometry.h"
+#include "Profile.h"
+#include "RoadExhaustion.h"
 
 #include <algorithm>
 #include <cmath>
+#include <random>
+#include <string>
 #include <vector>
 
 namespace {
 
+constexpr std::size_t kMaxAlleyProbesPerIndex = 2000;
+
+void recordAlleyProbe(Town& town, int queueIndex, const AlleyProbeLine& line) {
+    if (queueIndex < 0 || queueIndex >= static_cast<int>(town.alleyProbesByQueueIndex.size())) {
+        return;
+    }
+    std::vector<AlleyProbeLine>& probes =
+        town.alleyProbesByQueueIndex[static_cast<std::size_t>(queueIndex)];
+    if (probes.size() >= kMaxAlleyProbesPerIndex) {
+        return;
+    }
+    probes.push_back(line);
+}
+
 constexpr float kPi = 3.14159265358979323846f;
-constexpr float kInteriorCrossEps = 0.03f;
-
-float cross2D(const Vec2& a, const Vec2& b) {
-    return a.x * b.y - a.y * b.x;
-}
-
-float acuteAngleDegBetweenSegments(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1) {
-    const Vec2 d1 = (a1 - a0).normalized();
-    const Vec2 d2 = (b1 - b0).normalized();
-    if (d1.length() < 1e-4f || d2.length() < 1e-4f) {
-        return 90.f;
-    }
-    float dot = std::abs(d1.dot(d2));
-    dot       = std::min(1.f, dot);
-    return std::acos(dot) * 180.f / kPi;
-}
-
-bool alleyCrossingsMeetMinAngle(const Vec2& start, const Vec2& end, const Town& town,
-                                int hostCellId, float minAngleDeg) {
-    for (const Road& road : town.roads) {
-        if (!road.isSecondary || road.hostCellId != hostCellId) {
-            continue;
-        }
-        if (!segmentsCrossInInterior(start, end, road.a, road.b, kInteriorCrossEps)) {
-            continue;
-        }
-        const float angle = acuteAngleDegBetweenSegments(start, end, road.a, road.b);
-        if (angle + 1e-3f < minAngleDeg) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool alleyEndpointsMeetMinSpacing(const Vec2& start, const Vec2& end, const Town& town,
-                                  int hostCellId, float minSpacing) {
-    if (minSpacing <= 1e-3f) {
-        return true;
-    }
-
-    for (const Road& road : town.roads) {
-        if (!road.isSecondary || road.hostCellId != hostCellId) {
-            continue;
-        }
-        const float dStartA = (start - road.a).length();
-        const float dStartB = (start - road.b).length();
-        const float dEndA   = (end - road.a).length();
-        const float dEndB   = (end - road.b).length();
-        if (dStartA < minSpacing - 1e-3f || dStartB < minSpacing - 1e-3f || dEndA < minSpacing - 1e-3f
-            || dEndB < minSpacing - 1e-3f) {
-            return false;
-        }
-    }
-    return true;
-}
-
-struct AlleyProbeResult {
-    Vec2  start{};
-    Vec2  end{};
-    float gapT     = 0.f;
-    float angleDeg = 0.f;
-    float length   = 0.f;
-    bool  valid    = false;
-};
+constexpr float kJunctionSnapEps = 0.08f;
+constexpr float kThroughRayEps   = 0.1f;
 
 Vec2 rotateVec(const Vec2& v, float degrees) {
     const float rad = degrees * kPi / 180.f;
@@ -83,162 +40,13 @@ Vec2 rotateVec(const Vec2& v, float degrees) {
     return {v.x * c - v.y * s, v.x * s + v.y * c};
 }
 
-float rayToThroughRoadHit(const Town& town, int hostCellId, const Vec2& start, const Vec2& dir,
-                          int excludeRoadId, float maxDist, int* outDestRoadId = nullptr) {
-    float best     = -1.f;
-    int   bestRoad = -1;
-    for (const Road& road : town.roads) {
-        if (road.id == excludeRoadId) {
-            continue;
-        }
-        if (road.isSecondary) {
-            if (road.hostCellId != hostCellId) {
-                continue;
-            }
-        } else if (road.cellA != hostCellId && road.cellB != hostCellId) {
-            continue;
-        }
-        const float hit = raySegmentHitDist(start, dir, road.a, road.b, maxDist);
-        if (hit > 1.f && (best < 0.f || hit < best)) {
-            best     = hit;
-            bestRoad = road.id;
-        }
-    }
-    if (outDestRoadId != nullptr) {
-        *outDestRoadId = bestRoad;
-    }
-    return best;
-}
-
-bool roadInHostCell(const Road& road, int hostCellId) {
-    if (road.isSecondary) {
-        return road.hostCellId == hostCellId;
-    }
-    return road.cellA == hostCellId || road.cellB == hostCellId;
-}
-
-float rayToNearestRoadHit(const Town& town, int hostCellId, const Vec2& start, const Vec2& dir,
-                          float maxDist, int excludeRoadIdA, int excludeRoadIdB) {
-    float best = maxDist;
-    for (const Road& road : town.roads) {
-        if (road.id == excludeRoadIdA || road.id == excludeRoadIdB) {
-            continue;
-        }
-        if (!roadInHostCell(road, hostCellId)) {
-            continue;
-        }
-        const float hit = raySegmentHitDist(start, dir, road.a, road.b, maxDist);
-        if (hit > 1.f && hit < best) {
-            best = hit;
-        }
-    }
-    return best;
-}
-
-float polygonArea2D(const std::vector<Vec2>& points) {
-    if (points.size() < 3) {
-        return 0.f;
-    }
-    float sum = 0.f;
-    for (std::size_t i = 0; i < points.size(); ++i) {
-        const Vec2& a = points[i];
-        const Vec2& b = points[(i + 1) % points.size()];
-        sum += cross2D(a, b);
-    }
-    return std::abs(sum) * 0.5f;
-}
-
-float alleyCreatedArea(const WallGap& gap, const Vec2& gapPt, const Vec2& start, const Vec2& end,
-                       const Town& town, int destRoadId) {
-    const float gapWidth = gap.width();
-    const Vec2  gapLeft  = gapPt - gap.edgeDir * (gapWidth * 0.5f);
-    const Vec2  gapRight = gapPt + gap.edgeDir * (gapWidth * 0.5f);
-
-    if (destRoadId < 0 || destRoadId >= static_cast<int>(town.roads.size())) {
-        return std::abs(cross2D(start - gapPt, end - gapPt)) * 0.5f;
-    }
-
-    const Road& destRoad = town.roads[static_cast<std::size_t>(destRoadId)];
-    const Vec2  destTan  = (destRoad.b - destRoad.a).normalized();
-    if (destTan.length() < 1e-4f) {
-        return std::abs(cross2D(start - gapPt, end - gapPt)) * 0.5f;
-    }
-
-    const Vec2 endLeft  = end - destTan * (gapWidth * 0.5f);
-    const Vec2 endRight = end + destTan * (gapWidth * 0.5f);
-    return polygonArea2D({gapLeft, gapRight, endRight, endLeft});
-}
-
-bool alleyMeetsSideRoadClearance(const Town& town, int hostCellId, const Vec2& start, const Vec2& end,
-                                 int sourceRoadId, int destRoadId, float minSideDist,
-                                 int sampleCount) {
-    if (minSideDist <= 1e-3f) {
-        return true;
-    }
-
-    const Vec2  ab  = end - start;
-    const float len = ab.length();
-    if (len < 1e-3f) {
-        return false;
-    }
-
-    const Vec2 dir  = ab * (1.f / len);
-    const Vec2 left = perpendicular(dir).normalized();
-    const int  samples = std::max(2, sampleCount);
-
-    for (int i = 1; i < samples; ++i) {
-        const float u = static_cast<float>(i) / static_cast<float>(samples);
-        const Vec2  p = start + dir * (len * u);
-
-        for (const int sideSign : {1, -1}) {
-            const Vec2  perpDir = left * static_cast<float>(sideSign);
-            const float hit =
-                rayToNearestRoadHit(town, hostCellId, p, perpDir, 200.f, sourceRoadId, destRoadId);
-            if (hit + 1e-3f < minSideDist) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-float rayToCellBoundaryHit(const Cell& cell, const Vec2& start, const Vec2& dir, float maxDist) {
-    float best = maxDist;
-    if (cell.boundary.size() < 3) {
-        return best;
-    }
-    for (std::size_t i = 0; i < cell.boundary.size(); ++i) {
-        const Vec2& a = cell.boundary[i];
-        const Vec2& b = cell.boundary[(i + 1) % cell.boundary.size()];
-        const float hit = raySegmentHitDist(start, dir, a, b, maxDist);
-        if (hit > 1.f && hit < best) {
-            best = hit;
-        }
-    }
-    return best;
-}
-
-float cellRayLimit(const Cell& cell, const Vec2& start, const Vec2& dir, float configMax) {
-    const float boundaryReach = rayToCellBoundaryHit(cell, start, dir, 200.f);
-    if (configMax > 1e-3f) {
-        return std::min(boundaryReach, configMax);
-    }
-    return boundaryReach;
-}
-
 void buildGapTPositions(const WallGap& gap, float alleysPerUnitLength, std::vector<float>& out) {
     out.clear();
-    const float width = gap.width();
-    if (width < 1e-3f) {
-        return;
-    }
-
     const int probeCount =
-        std::max(1, static_cast<int>(std::ceil(width * std::max(0.f, alleysPerUnitLength))));
-    out.reserve(static_cast<std::size_t>(probeCount));
+        std::max(1, static_cast<int>(std::ceil(gap.width() * std::max(0.f, alleysPerUnitLength))));
     for (int i = 0; i < probeCount; ++i) {
         const float u = probeCount == 1 ? 0.5f : static_cast<float>(i) / (probeCount - 1);
-        out.push_back(gap.tMin + u * width);
+        out.push_back(gap.tMin + u * gap.width());
     }
 }
 
@@ -248,437 +56,687 @@ void buildAngleSamples(float maxAngleDeg, int angleCount, std::vector<float>& ou
         out.push_back(0.f);
         return;
     }
-    out.reserve(static_cast<std::size_t>(angleCount));
     for (int i = 0; i < angleCount; ++i) {
         const float u = static_cast<float>(i) / static_cast<float>(angleCount - 1);
         out.push_back(-maxAngleDeg + u * (2.f * maxAngleDeg));
     }
 }
 
-bool probeThroughAlley(const Town& town, const WallGap& gap, float gapT, float angleDeg,
-                       float minLength, float maxLength, float setback,
-                       float minCrossingAngleDeg, float minEndpointSpacing, float minCreatedArea,
-                       float minSideRoadDist, int sideRoadSampleCount, const DefCache& defs,
-                       AlleyProbeResult& out) {
-    out = {};
-    if (gap.cellId < 0 || gap.cellId >= static_cast<int>(town.cells.size())) {
-        return false;
+void buildStubTurnAngleSamples(int angleCount, std::vector<float>& out) {
+    out.clear();
+    const int count = std::max(19, angleCount * 6);
+    if (count <= 1) {
+        out.push_back(0.f);
+        return;
     }
-
-    const Cell& cell = town.cells[static_cast<std::size_t>(gap.cellId)];
-    const Vec2  baseInward =
-        gap.inward.length() > 1e-4f ? gap.inward.normalized() : Vec2{};
-    if (baseInward.length() < 1e-4f) {
-        return false;
+    for (int i = 0; i < count; ++i) {
+        const float u = static_cast<float>(i) / static_cast<float>(count - 1);
+        out.push_back(-90.f + u * 180.f);
     }
+}
 
-    const Vec2 gapPt = gap.origin + gap.edgeDir * gapT;
-    const Vec2 dir   = rotateVec(baseInward, angleDeg).normalized();
-    const Vec2 start = gapPt + dir * setback;
+void shuffleProbeOrder(std::vector<float>& angles, std::vector<float>& gapTs, int townSeed,
+                       int queueIndex, const WallGap& gap) {
+    std::seed_seq angleSeed{townSeed, queueIndex, gap.roadId, gap.bankIndex};
+    std::mt19937  angleRng(angleSeed);
+    std::shuffle(angles.begin(), angles.end(), angleRng);
 
-    out.gapT     = gapT;
-    out.angleDeg = angleDeg;
-    out.start    = start;
+    std::seed_seq gapSeed{townSeed, queueIndex, gap.roadId, gap.bankIndex, 911};
+    std::mt19937  gapRng(gapSeed);
+    std::shuffle(gapTs.begin(), gapTs.end(), gapRng);
+}
 
-    if (!pointInCellBoundary(start, cell, town.roads)) {
-        out.end = start + dir * std::max(minLength, 8.f);
-        return false;
+struct RayRoadHit {
+    int   roadId = -1;
+    float dist   = -1.f;
+    Vec2  point{};
+};
+
+struct AlleyProbeViz {
+    Vec2 start{};
+    Vec2 end{};
+    bool valid = false;
+};
+
+void fillProbeViz(AlleyProbeViz* outViz, const Vec2& start, const Vec2& end) {
+    if (outViz == nullptr) {
+        return;
     }
+    outViz->start = start;
+    outViz->end   = end;
+    outViz->valid = true;
+}
 
-    const float maxDist = cellRayLimit(cell, start, dir, maxLength);
-    int         destRoadId = -1;
-    const float throughHit =
-        rayToThroughRoadHit(town, gap.cellId, start, dir, gap.roadId, maxDist, &destRoadId);
-    if (throughHit <= 1.f) {
-        out.end = start + dir * maxDist;
-        return false;
+Vec2 probeVizStart(const AlleyProbeCandidate& probe, const Vec2& firstStart) {
+    return probe.segments.empty() ? firstStart : probe.segments.front().start;
+}
+
+struct AlleyProbeStats {
+    int probes            = 0;
+    int badDir            = 0;
+    int noRayHit          = 0;
+    int tooShort          = 0;
+    int tooLong           = 0;
+    int blockedByMain     = 0;
+    int setbackFail       = 0;
+    int chainExhausted    = 0;
+    int thinSide          = 0;
+    int badAngle          = 0;
+    int endpointSpacing   = 0;
+    int bankParallel      = 0;
+    int depthStubFail     = 0;
+    int turnFail          = 0;
+};
+
+void appendAlleyProbeStatSummary(const AlleyProbeStats& stats, std::string& out) {
+    out += " probes=" + std::to_string(stats.probes);
+    if (stats.badDir > 0) {
+        out += " bad_dir=" + std::to_string(stats.badDir);
     }
-
-    if (throughHit < minLength - 1e-3f) {
-        out.end = start + dir * throughHit;
-        return false;
+    if (stats.noRayHit > 0) {
+        out += " no_ray_hit=" + std::to_string(stats.noRayHit);
     }
-
-    const Vec2 end = start + dir * throughHit;
-    out.end        = end;
-    out.length     = throughHit;
-
-    if (alleySegmentBlocked(start, end, setback, town, defs)) {
-        return false;
+    if (stats.tooShort > 0) {
+        out += " too_short=" + std::to_string(stats.tooShort);
     }
-
-    if (!alleyCrossingsMeetMinAngle(start, end, town, gap.cellId, minCrossingAngleDeg)) {
-        return false;
+    if (stats.tooLong > 0) {
+        out += " too_long=" + std::to_string(stats.tooLong);
     }
-
-    if (!alleyEndpointsMeetMinSpacing(start, end, town, gap.cellId, minEndpointSpacing)) {
-        return false;
+    if (stats.blockedByMain > 0) {
+        out += " blocked_by_main=" + std::to_string(stats.blockedByMain);
     }
+    if (stats.setbackFail > 0) {
+        out += " setback=" + std::to_string(stats.setbackFail);
+    }
+    if (stats.chainExhausted > 0) {
+        out += " chain_exhausted=" + std::to_string(stats.chainExhausted);
+    }
+    if (stats.thinSide > 0) {
+        out += " thin_side=" + std::to_string(stats.thinSide);
+    }
+    if (stats.badAngle > 0) {
+        out += " bad_angle=" + std::to_string(stats.badAngle);
+    }
+    if (stats.endpointSpacing > 0) {
+        out += " endpoint_spacing=" + std::to_string(stats.endpointSpacing);
+    }
+    if (stats.bankParallel > 0) {
+        out += " bank_parallel=" + std::to_string(stats.bankParallel);
+    }
+    if (stats.depthStubFail > 0) {
+        out += " depth_stub_fail=" + std::to_string(stats.depthStubFail);
+    }
+    if (stats.turnFail > 0) {
+        out += " turn_fail=" + std::to_string(stats.turnFail);
+    }
+}
 
-    if (minCreatedArea > 1e-3f) {
-        const float createdArea =
-            alleyCreatedArea(gap, gapPt, start, end, town, destRoadId);
-        if (createdArea + 1e-3f < minCreatedArea) {
-            return false;
+void recordQualityReject(AlleyProbeStats* stats, AlleyQualityReject reject) {
+    if (stats == nullptr) {
+        return;
+    }
+    switch (reject) {
+    case AlleyQualityReject::ThinSide:
+        ++stats->thinSide;
+        break;
+    case AlleyQualityReject::BadAngle:
+        ++stats->badAngle;
+        break;
+    case AlleyQualityReject::EndpointSpacing:
+        ++stats->endpointSpacing;
+        break;
+    case AlleyQualityReject::BankParallel:
+        ++stats->bankParallel;
+        break;
+    default:
+        break;
+    }
+}
+
+bool rayToRoadHitExcluding(const Town& town, const Vec2& start, const Vec2& dir, int excludeRoadId,
+                           float maxDist, RayRoadHit& out) {
+    RayRoadHit best;
+    const Vec2 rayEnd = start + dir * maxDist;
+    for (const Road& road : town.roads) {
+        if (road.id == excludeRoadId) {
+            continue;
         }
-    }
+        float tRay = 0.f;
+        float uSeg = 0.f;
+        if (!segmentCrossingParams(start, rayEnd, road.a, road.b, tRay, uSeg)) {
+            continue;
+        }
+        const float hitDist = tRay * maxDist;
+        if (hitDist < 1.f || hitDist > maxDist + 1e-3f) {
+            continue;
+        }
+        if (best.dist >= 0.f && hitDist >= best.dist - 1e-4f) {
+            continue;
+        }
 
-    if (!alleyMeetsSideRoadClearance(town, gap.cellId, start, end, gap.roadId, destRoadId,
-                                     minSideRoadDist, sideRoadSampleCount)) {
+        Vec2 hitPoint = road.a + (road.b - road.a) * uSeg;
+        if ((hitPoint - road.a).length() <= kJunctionSnapEps) {
+            hitPoint = road.a;
+        } else if ((hitPoint - road.b).length() <= kJunctionSnapEps) {
+            hitPoint = road.b;
+        }
+
+        best.roadId = road.id;
+        best.dist   = hitDist;
+        best.point  = hitPoint;
+    }
+    if (best.roadId < 0) {
         return false;
     }
-
-    out.valid = true;
+    out = best;
     return true;
 }
 
-void appendProbeLine(const Town& town, const WallGap& gap, float gapT, float angleDeg,
-                     float maxLength, float setback, float minCrossingAngleDeg,
-                     float minEndpointSpacing, float minCreatedArea, float minSideRoadDist,
-                     int sideRoadSampleCount, const DefCache& defs, bool valid,
-                     std::vector<AlleyProbeLine>& probeLines) {
-    AlleyProbeResult probe;
-    probeThroughAlley(town, gap, gapT, angleDeg, 0.f, maxLength, setback, minCrossingAngleDeg,
-                      minEndpointSpacing, minCreatedArea, minSideRoadDist, sideRoadSampleCount,
-                      defs, probe);
-
-    AlleyProbeLine line;
-    line.a     = probe.start;
-    line.b     = probe.end;
-    line.valid = valid;
-    if ((line.b - line.a).length() < 0.5f) {
-        const Vec2 gapPt = gap.origin + gap.edgeDir * gapT;
-        line.a           = gapPt;
-        line.b           = gapPt + gap.inward.normalized() * 8.f;
-    }
-    if ((line.b - line.a).length() > 0.5f) {
-        probeLines.push_back(line);
-    }
-}
-
-struct CellCandidate {
-    int   cellId     = -1;
-    float centerDist = 0.f;
-    bool  expanding  = false;
+struct CachedTurnCandidate {
+    AlleyProbeCandidate probe;
+    float             turnAngleDeg = 0.f;
+    float             score        = -1.f;
+    bool              perfect      = false;
 };
 
-bool cellHasBlockingPendingFills(const Town& town, int cellId, int failLimit) {
-    for (const PendingAlleyFill& pending : town.pendingAlleyFills) {
-        if (pending.hostCellId == cellId && pending.consecutiveFillFails < failLimit) {
+float scoreTurnCandidate(const Town& town, const AlleyProbeCandidate& probe, float turnAngleDeg,
+                         bool perfect) {
+    if (probe.segments.size() < 2) {
+        return -1.f;
+    }
+    const AlleySegmentCandidate& terminal = probe.segments.back();
+    if (terminal.destRoadId < 0) {
+        return -1.f;
+    }
+
+    float score = alleyCrossingAngleDeg(town, terminal.start, terminal.end, terminal.destRoadId);
+    if (terminal.destRoadId < static_cast<int>(town.roads.size())
+        && !town.roads[static_cast<std::size_t>(terminal.destRoadId)].isSecondary) {
+        score += 200.f;
+    }
+    score += (terminal.end - terminal.start).length() * 0.05f;
+    if (perfect) {
+        score += 500.f;
+    }
+    score += std::abs(std::abs(turnAngleDeg) - 90.f) * 0.15f;
+    return score;
+}
+
+bool trySimulateTurnAngle(Town& town, const WallGap& gap, float minLength, float maxLength,
+                          float setback, float minSideRoadDist, const DefCache& defs,
+                          const AlleyProbeCandidate& stubProbe, float turnAngle,
+                          AlleyProbeCandidate& outProbe) {
+    if (stubProbe.segments.empty()) {
+        return false;
+    }
+
+    const AlleySegmentCandidate& leg1 = stubProbe.segments.front();
+    const Vec2                   gapPoint  = leg1.start;
+    const Vec2                   turnPoint = leg1.end;
+    const Vec2                   leg1Dir   = (turnPoint - gapPoint).normalized();
+    if (leg1Dir.length() < 1e-4f) {
+        return false;
+    }
+
+    outProbe              = stubProbe;
+    outProbe.turnAngleDeg = turnAngle;
+
+    const float spawnInset    = std::max(setback, minSideRoadDist);
+    const float roadHalfWidth = spawnInset * 0.5f;
+    const float maxDist       = maxLength > 1e-3f ? maxLength : 200.f;
+    const Vec2  dir           = rotateVec(leg1Dir, turnAngle).normalized();
+    if (dir.length() < 1e-4f) {
+        return false;
+    }
+
+    Vec2  start         = turnPoint + dir * kThroughRayEps;
+    int   excludeRoadId = gap.roadId;
+    float totalLen      = 0.f;
+
+    for (int chain = 0; chain < 8; ++chain) {
+        const float remaining = maxDist - totalLen;
+        RayRoadHit  hit;
+        if (!rayToRoadHitExcluding(town, start, dir, excludeRoadId, remaining, hit)) {
+            return false;
+        }
+
+        const float segmentLen = (hit.point - start).length();
+        if (segmentLen < minLength) {
+            return false;
+        }
+        if (segmentLen + totalLen > maxDist + 1e-3f) {
+            return false;
+        }
+        if (segmentsCrossInInterior(gapPoint, turnPoint, start, hit.point)) {
+            return false;
+        }
+        if (alleySegmentBlockedByMain(start, hit.point, roadHalfWidth, town, defs)) {
+            return false;
+        }
+        collectAuxiliaryDemolitionsForAlley(start, hit.point, roadHalfWidth, town,
+                                            outProbe.demolitions);
+        if (!segmentClearsRoadSetback(start, hit.point, town, gap.roadId, spawnInset, hit.roadId)) {
+            return false;
+        }
+
+        const Vec2 segmentStart = outProbe.segments.size() == 1 ? turnPoint : start;
+        outProbe.segments.push_back({segmentStart, hit.point, hit.roadId});
+
+        if (hit.roadId < 0 || hit.roadId >= static_cast<int>(town.roads.size())
+            || !town.roads[static_cast<std::size_t>(hit.roadId)].isSecondary) {
             return true;
         }
+
+        totalLen += segmentLen;
+        start         = hit.point + dir * kThroughRayEps;
+        excludeRoadId = hit.roadId;
     }
+
     return false;
 }
 
-void markCellsWithNoUncheckedGaps(Town& town, const std::vector<WallGap>& allGaps, int failLimit) {
-    for (Cell& cell : town.cells) {
-        if (cell.alleyState == AlleyCellState::Finished) {
+bool selectBestTurnFromStub(Town& town, const WallGap& gap, float gapT, float angleDeg,
+                            float minLength, float maxLength, float setback,
+                            const TownConfig& townCfg, const DefCache& defs,
+                            const AlleyProbeCandidate& stubProbe, AlleyProbeCandidate& outProbe,
+                            float& outTurnAngleDeg, bool& outPerfect, AlleyProbeStats* stats,
+                            int townSeed, int queueIndex, AlleyProbeViz* outViz = nullptr) {
+    outPerfect = false;
+    if (stubProbe.segments.empty()) {
+        return false;
+    }
+
+    const Vec2 gapPoint = stubProbe.segments.front().start;
+
+    std::vector<float> turnAngles;
+    buildStubTurnAngleSamples(townCfg.alleyAngleCount, turnAngles);
+
+    const int gapTKey  = static_cast<int>(gapT * 1000.f);
+    const int angleKey = static_cast<int>(angleDeg * 10.f);
+    std::seed_seq turnSeed{townSeed, queueIndex, gap.roadId, gap.bankIndex, gapTKey, angleKey,
+                           7331};
+    std::mt19937 turnRng(turnSeed);
+    std::shuffle(turnAngles.begin(), turnAngles.end(), turnRng);
+
+    const float spawnInset = std::max(setback, townCfg.minAlleySideRoadDist);
+
+    CachedTurnCandidate bestPerfect;
+    CachedTurnCandidate bestGood;
+    bestPerfect.score = -1.f;
+    bestGood.score    = -1.f;
+
+    for (float turnAngle : turnAngles) {
+        AlleyProbeCandidate attempt;
+        if (!trySimulateTurnAngle(town, gap, minLength, maxLength, setback, spawnInset, defs,
+                                  stubProbe, turnAngle, attempt)) {
             continue;
         }
-        if (cellHasBlockingPendingFills(town, cell.id, failLimit)) {
-            continue;
-        }
-        if (!cellHasUncheckedPrimaryAlleyGaps(town, cell.id, allGaps)
-            && !cellHasUncheckedSecondaryHostAlleyGaps(town, cell.id, allGaps)) {
-            cell.alleyState = AlleyCellState::Finished;
+
+        AlleyQualityReject reject = AlleyQualityReject::None;
+        const bool         perfect =
+            validateAlleyProbe(town, attempt, townCfg, spawnInset, &reject);
+        const float score = scoreTurnCandidate(town, attempt, turnAngle, perfect);
+
+        CachedTurnCandidate* bucket = perfect ? &bestPerfect : &bestGood;
+        if (score > bucket->score) {
+            bucket->probe        = std::move(attempt);
+            bucket->turnAngleDeg = turnAngle;
+            bucket->score        = score;
+            bucket->perfect      = perfect;
         }
     }
+
+    const CachedTurnCandidate* chosen =
+        bestPerfect.score >= 0.f ? &bestPerfect
+                                 : (bestGood.score >= 0.f ? &bestGood : nullptr);
+    if (chosen == nullptr) {
+        if (stats != nullptr) {
+            ++stats->turnFail;
+        }
+        fillProbeViz(outViz, gapPoint, stubProbe.segments.front().end);
+        return false;
+    }
+
+    outProbe        = chosen->probe;
+    outTurnAngleDeg = chosen->turnAngleDeg;
+    outPerfect      = chosen->perfect;
+    fillProbeViz(outViz, gapPoint, outProbe.segments.back().end);
+    return true;
 }
 
-int pickCellForAlley(Town& town, const std::vector<WallGap>& allGaps, int failLimit) {
-    markCellsWithNoUncheckedGaps(town, allGaps, failLimit);
+bool simulateProbeThroughAlley(const Town& town, const WallGap& gap, float gapT, float angleDeg,
+                               float minLength, float maxLength, float setback,
+                               float minSideRoadDist, const DefCache& defs,
+                               AlleyProbeCandidate& outProbe, AlleyProbeStats* stats = nullptr,
+                               AlleyProbeViz* outViz = nullptr) {
+    if (stats != nullptr) {
+        ++stats->probes;
+    }
 
-    std::vector<CellCandidate> candidates;
-    candidates.reserve(town.cells.size());
+    outProbe.gap            = gap;
+    outProbe.segments.clear();
+    outProbe.demolitions.clear();
+    outProbe.probeAngleDeg  = angleDeg;
 
-    for (const WallGap& gap : allGaps) {
-        if (gap.cellId < 0 || gap.cellId >= static_cast<int>(town.cells.size())) {
+    const float spawnInset  = std::max(setback, minSideRoadDist);
+    const float roadHalfWidth = spawnInset * 0.5f;
+
+    const Vec2 gapPoint   = gap.origin + gap.edgeDir * gapT;
+    const Vec2 firstStart = gapPoint + gap.inward * spawnInset;
+    Vec2       start      = firstStart;
+    Vec2       dir        = rotateVec(gap.inward, angleDeg).normalized();
+    outProbe.probeDir     = dir;
+    if (dir.length() < 1e-4f) {
+        if (stats != nullptr) {
+            ++stats->badDir;
+        }
+        const float maxDist = maxLength > 1e-3f ? maxLength : 200.f;
+        fillProbeViz(outViz, firstStart, firstStart + gap.inward.normalized() * maxDist);
+        return false;
+    }
+
+    const float maxDist       = maxLength > 1e-3f ? maxLength : 200.f;
+    int         excludeRoadId = gap.roadId;
+    float       totalLen      = 0.f;
+
+    for (int chain = 0; chain < 8; ++chain) {
+        const float remaining = maxDist - totalLen;
+        RayRoadHit  hit;
+        if (!rayToRoadHitExcluding(town, start, dir, excludeRoadId, remaining, hit)) {
+            if (stats != nullptr) {
+                ++stats->noRayHit;
+            }
+            fillProbeViz(outViz, probeVizStart(outProbe, firstStart),
+                         start + dir * std::max(remaining, 1.f));
+            return false;
+        }
+
+        const float segmentLen = (hit.point - start).length();
+        if (segmentLen < minLength) {
+            if (stats != nullptr) {
+                ++stats->tooShort;
+            }
+            fillProbeViz(outViz, probeVizStart(outProbe, gapPoint), hit.point);
+            return false;
+        }
+        if (segmentLen + totalLen > maxDist + 1e-3f) {
+            if (stats != nullptr) {
+                ++stats->tooLong;
+            }
+            fillProbeViz(outViz, probeVizStart(outProbe, gapPoint),
+                         start + dir * std::max(remaining, 1.f));
+            return false;
+        }
+        if (alleySegmentBlockedByMain(start, hit.point, roadHalfWidth, town, defs)) {
+            if (stats != nullptr) {
+                ++stats->blockedByMain;
+            }
+            fillProbeViz(outViz, probeVizStart(outProbe, gapPoint), hit.point);
+            return false;
+        }
+        collectAuxiliaryDemolitionsForAlley(start, hit.point, roadHalfWidth, town,
+                                            outProbe.demolitions);
+        if (!segmentClearsRoadSetback(start, hit.point, town, gap.roadId, spawnInset,
+                                      hit.roadId)) {
+            if (stats != nullptr) {
+                ++stats->setbackFail;
+            }
+            fillProbeViz(outViz, probeVizStart(outProbe, gapPoint), hit.point);
+            return false;
+        }
+
+        const Vec2 segmentStart = outProbe.segments.empty() ? gapPoint : start;
+        outProbe.segments.push_back({segmentStart, hit.point, hit.roadId});
+
+        if (hit.roadId < 0 || hit.roadId >= static_cast<int>(town.roads.size())
+            || !town.roads[static_cast<std::size_t>(hit.roadId)].isSecondary) {
+            return true;
+        }
+
+        totalLen += segmentLen;
+        start         = hit.point + dir * kThroughRayEps;
+        excludeRoadId = hit.roadId;
+    }
+
+    if (stats != nullptr) {
+        ++stats->chainExhausted;
+    }
+    if (!outProbe.segments.empty()) {
+        fillProbeViz(outViz, outProbe.segments.front().start, outProbe.segments.back().end);
+    } else {
+        fillProbeViz(outViz, firstStart, start + dir * std::max(maxDist, 1.f));
+    }
+    outProbe.segments.clear();
+    outProbe.demolitions.clear();
+    return false;
+}
+
+bool simulateDepthCapStub(Town& town, const WallGap& gap, float gapT, float angleDeg, float minLength,
+                            float setback, float minSideRoadDist, const DefCache& defs,
+                            AlleyProbeCandidate& outProbe, AlleyProbeStats* stats = nullptr,
+                            AlleyProbeViz* outViz = nullptr) {
+    outProbe.gap           = gap;
+    outProbe.segments.clear();
+    outProbe.demolitions.clear();
+    outProbe.probeAngleDeg = angleDeg;
+    outProbe.placementKind = AlleyPlacementKind::DeadEnd;
+    outProbe.turnAngleDeg  = 0.f;
+
+    const float spawnInset    = std::max(setback, minSideRoadDist);
+    const float roadHalfWidth = spawnInset * 0.5f;
+    const Vec2  gapPoint      = gap.origin + gap.edgeDir * gapT;
+    const Vec2  inward        = gap.inward.normalized();
+    outProbe.probeDir         = inward;
+    if (inward.length() < 1e-4f) {
+        if (stats != nullptr) {
+            ++stats->depthStubFail;
+        }
+        return false;
+    }
+
+    const float frontage = std::max(gap.width(), 1.f);
+    const float depthCap =
+        maxPlotDepthToRoadHit(gapPoint, gap.edgeDir, frontage, gap.inward, setback, gap.roadId,
+                              gap.bankIndex, town);
+    if (depthCap < minLength || depthCap <= 1e-3f) {
+        if (stats != nullptr) {
+            ++stats->depthStubFail;
+        }
+        fillProbeViz(outViz, gapPoint, gapPoint + inward * std::max(depthCap, minLength));
+        return false;
+    }
+
+    const Vec2 turnPoint = gapPoint + inward * depthCap;
+    if (alleySegmentBlockedByMain(gapPoint, turnPoint, roadHalfWidth, town, defs)) {
+        if (stats != nullptr) {
+            ++stats->blockedByMain;
+        }
+        fillProbeViz(outViz, gapPoint, turnPoint);
+        return false;
+    }
+    collectAuxiliaryDemolitionsForAlley(gapPoint, turnPoint, roadHalfWidth, town,
+                                        outProbe.demolitions);
+    if (!segmentClearsRoadSetback(gapPoint, turnPoint, town, gap.roadId, spawnInset, -1)) {
+        if (stats != nullptr) {
+            ++stats->setbackFail;
+        }
+        fillProbeViz(outViz, gapPoint, turnPoint);
+        return false;
+    }
+
+    outProbe.segments.push_back({gapPoint, turnPoint, -1});
+    return true;
+}
+
+bool applyAlleyProbe(Town& town, const AlleyProbeCandidate& probe, int queueIndex,
+                     std::vector<SecondaryRoadRecord>& outRecords) {
+    outRecords.clear();
+    if (probe.segments.empty()) {
+        return false;
+    }
+
+    const bool straightThrough = probe.placementKind == AlleyPlacementKind::Straight
+                                 && probe.segments.size() > 1;
+    const bool isTurn = probe.placementKind == AlleyPlacementKind::Turn;
+
+    for (std::size_t i = 0; i < probe.segments.size(); ++i) {
+        const AlleySegmentCandidate& segment = probe.segments[i];
+        SecondaryRoadRecord          rec;
+        rec.a             = segment.start;
+        rec.b             = segment.end;
+        rec.probeAngleDeg = probe.probeAngleDeg;
+        rec.hostRoadId    = probe.gap.roadId;
+        rec.hostBankIndex = probe.gap.bankIndex;
+
+        if (isTurn && i > 0) {
+            rec.hostRoadId    = -1;
+            rec.hostBankIndex = -1;
+            rec.kind          = AlleyPlacementKind::Turn;
+            rec.turnAngleDeg  = probe.turnAngleDeg;
+            rec.isThrough     = probe.segments.size() > 2;
+        } else if (probe.placementKind == AlleyPlacementKind::DeadEnd) {
+            rec.kind      = AlleyPlacementKind::DeadEnd;
+            rec.isThrough = false;
+        } else {
+            rec.kind      = AlleyPlacementKind::Straight;
+            rec.isThrough = straightThrough;
+        }
+
+        outRecords.push_back(rec);
+    }
+
+    if (!probe.demolitions.empty()) {
+        applyAuxiliaryDemolitions(town, probe.demolitions);
+        std::string labels;
+        for (const AuxiliaryDemolition& demo : probe.demolitions) {
+            if (!labels.empty()) {
+                labels += ",";
+            }
+            labels += std::to_string(demo.footprintLabelId);
+        }
+        Logger::log("layout",
+                    "alley_demolish: queueIndex=" + std::to_string(queueIndex) + " instance="
+                        + std::to_string(probe.demolitions.front().instanceId) + " labels="
+                        + labels + " count=" + std::to_string(probe.demolitions.size()));
+    }
+
+    return true;
+}
+
+bool probeThroughAlley(Town& town, const WallGap& gap, float gapT, float angleDeg, float minLength,
+                       float maxLength, float setback, const TownConfig& townCfg,
+                       const DefCache& defs, int queueIndex,
+                       std::vector<SecondaryRoadRecord>& outRecords,
+                       AlleyProbeStats* stats = nullptr, AlleyProbeViz* outViz = nullptr) {
+    AlleyProbeCandidate probe;
+    if (!simulateProbeThroughAlley(town, gap, gapT, angleDeg, minLength, maxLength, setback,
+                                   townCfg.minAlleySideRoadDist, defs, probe, stats, outViz)) {
+        return false;
+    }
+
+    AlleyQualityReject reject = AlleyQualityReject::None;
+    const float spawnInset = std::max(setback, townCfg.minAlleySideRoadDist);
+    if (!validateAlleyProbe(town, probe, townCfg, spawnInset, &reject)) {
+        recordQualityReject(stats, reject);
+        if (outViz != nullptr && !probe.segments.empty()) {
+            fillProbeViz(outViz, probe.segments.front().start, probe.segments.back().end);
+        }
+        return false;
+    }
+
+    return applyAlleyProbe(town, probe, queueIndex, outRecords);
+}
+
+bool probeAlleyWithFallback(Town& town, const WallGap& gap, float gapT, float angleDeg,
+                            float minLength, float maxLength, float setback,
+                            const TownConfig& townCfg, const DefCache& defs, int queueIndex,
+                            int townSeed, std::vector<SecondaryRoadRecord>& outRecords,
+                            AlleyProbeStats* stats = nullptr, AlleyProbeViz* outViz = nullptr) {
+    if (probeThroughAlley(town, gap, gapT, angleDeg, minLength, maxLength, setback, townCfg,
+                          defs, queueIndex, outRecords, stats, outViz)) {
+        return true;
+    }
+
+    AlleyProbeCandidate stubProbe;
+    if (!simulateDepthCapStub(town, gap, gapT, angleDeg, minLength, setback,
+                              townCfg.minAlleySideRoadDist, defs, stubProbe, stats, outViz)) {
+        return false;
+    }
+
+    const float spawnInset = std::max(setback, townCfg.minAlleySideRoadDist);
+    AlleyQualityReject reject = AlleyQualityReject::None;
+    if (!validateAlleyProbe(town, stubProbe, townCfg, spawnInset, &reject)) {
+        recordQualityReject(stats, reject);
+        if (outViz != nullptr && !stubProbe.segments.empty()) {
+            fillProbeViz(outViz, stubProbe.segments.front().start, stubProbe.segments.back().end);
+        }
+        return false;
+    }
+
+    AlleyProbeCandidate turnProbe = stubProbe;
+    float               turnAngleDeg = 0.f;
+    bool                turnPerfect  = false;
+    if (selectBestTurnFromStub(town, gap, gapT, angleDeg, minLength, maxLength, setback, townCfg,
+                               defs, stubProbe, turnProbe, turnAngleDeg, turnPerfect, stats,
+                               townSeed, queueIndex, outViz)) {
+        turnProbe.placementKind = AlleyPlacementKind::Turn;
+        turnProbe.turnAngleDeg  = turnAngleDeg;
+        if (!turnPerfect) {
+            Logger::log("layout",
+                        "alley_turn_partial: queueIndex=" + std::to_string(queueIndex)
+                            + " turn_angle=" + std::to_string(turnAngleDeg));
+        }
+        return applyAlleyProbe(town, turnProbe, queueIndex, outRecords);
+    }
+
+    return applyAlleyProbe(town, stubProbe, queueIndex, outRecords);
+}
+
+struct GapCandidate {
+    WallGap gap;
+    float   centerDist = 0.f;
+};
+
+std::vector<GapCandidate> collectOrderedRoadGaps(Town& town, float minGapWidth, int forceRoadId,
+                                                 float maxDistInclusive) {
+    std::vector<WallGap> gaps;
+    collectWallGapsInDistRange(town, minGapWidth, maxDistInclusive, gaps);
+
+    std::vector<GapCandidate> candidates;
+    candidates.reserve(gaps.size());
+    for (const WallGap& gap : gaps) {
+        if (forceRoadId >= 0 && gap.roadId != forceRoadId) {
             continue;
         }
         if (isAlleyGapChecked(town, gap)) {
             continue;
         }
-
-        const Cell& cell = town.cells[static_cast<std::size_t>(gap.cellId)];
-        if (cell.alleyState == AlleyCellState::Finished) {
+        if (!bankHasBuildingOnSide(town, gap.roadId, gap.bankIndex)) {
             continue;
         }
-
-        const float centerDist = (cell.centroid - town.center).length();
-        const bool  expanding  = cell.alleyState == AlleyCellState::Expanding;
-        const auto  existing =
-            std::find_if(candidates.begin(), candidates.end(),
-                         [gap](const CellCandidate& c) { return c.cellId == gap.cellId; });
-        if (existing == candidates.end()) {
-            candidates.push_back({gap.cellId, centerDist, expanding});
-        }
+        const Vec2 mid = gap.gapMidPoint();
+        candidates.push_back({gap, (mid - town.center).length()});
     }
 
-    std::sort(candidates.begin(), candidates.end(), [](const CellCandidate& lhs,
-                                                         const CellCandidate& rhs) {
-        if (lhs.expanding != rhs.expanding) {
-            return lhs.expanding > rhs.expanding;
+    std::sort(candidates.begin(), candidates.end(), [](const GapCandidate& a, const GapCandidate& b) {
+        if (std::abs(a.centerDist - b.centerDist) > 1e-3f) {
+            return a.centerDist < b.centerDist;
         }
-        return lhs.centerDist < rhs.centerDist;
+        if (a.gap.roadId != b.gap.roadId) {
+            return a.gap.roadId < b.gap.roadId;
+        }
+        return a.gap.tMin < b.gap.tMin;
     });
-
-    return candidates.empty() ? -1 : candidates.front().cellId;
-}
-
-int pickNextActiveAlleyCell(Town& town, const std::vector<WallGap>& allGaps, int failLimit,
-                            int excludeCellId = -1) {
-    markCellsWithNoUncheckedGaps(town, allGaps, failLimit);
-
-    auto findBestCell = [&](bool primaryPhase, int excludeCellId) -> int {
-        int   bestCellId = -1;
-        float bestDist   = 0.f;
-        for (const WallGap& gap : allGaps) {
-            if (gap.cellId < 0 || gap.cellId >= static_cast<int>(town.cells.size())) {
-                continue;
-            }
-            if (excludeCellId >= 0 && gap.cellId == excludeCellId) {
-                continue;
-            }
-            if (isAlleyGapChecked(town, gap)) {
-                continue;
-            }
-            const bool onSecondary = isSecondaryHostGap(town, gap);
-            if (primaryPhase) {
-                if (onSecondary) {
-                    continue;
-                }
-            } else if (!onSecondary) {
-                continue;
-            }
-            const Cell& cell = town.cells[static_cast<std::size_t>(gap.cellId)];
-            if (cell.alleyState == AlleyCellState::Finished) {
-                continue;
-            }
-            if (cellHasBlockingPendingFills(town, gap.cellId, failLimit)) {
-                continue;
-            }
-            const float dist = (cell.centroid - town.center).length();
-            if (bestCellId < 0 || dist < bestDist) {
-                bestCellId = gap.cellId;
-                bestDist   = dist;
-            }
-        }
-        return bestCellId;
-    };
-
-    const int primaryCell = findBestCell(true, excludeCellId);
-    if (primaryCell >= 0) {
-        return primaryCell;
-    }
-    return findBestCell(false, excludeCellId);
-}
-
-bool pickNextUncheckedGap(const std::vector<WallGap>& allGaps, int cellId, const Town& town,
-                          WallGap& out) {
-    const bool preferPrimary = cellHasUncheckedPrimaryAlleyGaps(town, cellId, allGaps);
-
-    std::vector<const WallGap*> unchecked;
-    unchecked.reserve(allGaps.size());
-    for (const WallGap& gap : allGaps) {
-        if (gap.cellId != cellId || isAlleyGapChecked(town, gap)) {
-            continue;
-        }
-        const bool onSecondary = isSecondaryHostGap(town, gap);
-        if (preferPrimary && onSecondary) {
-            continue;
-        }
-        if (!preferPrimary && !onSecondary) {
-            continue;
-        }
-        unchecked.push_back(&gap);
-    }
-
-    if (unchecked.empty()) {
-        return false;
-    }
-
-    std::sort(unchecked.begin(), unchecked.end(), [&](const WallGap* lhs, const WallGap* rhs) {
-        return (lhs->gapMidPoint() - town.center).length()
-             < (rhs->gapMidPoint() - town.center).length();
-    });
-
-    out = *unchecked.front();
-    return true;
-}
-
-bool probeWallGap(Town& town, const WallGap& gap, float setback, const TownConfig& townCfg,
-                  const DefCache& defs, std::vector<AlleyProbeLine>& probeLines,
-                  AlleyProbeResult& bestOut) {
-    std::vector<float> gapTs;
-    std::vector<float> angles;
-    buildGapTPositions(gap, townCfg.alleysPerUnitLength, gapTs);
-    buildAngleSamples(townCfg.maxAlleyAngleDeg, townCfg.alleyAngleCount, angles);
-
-    for (const float gapT : gapTs) {
-        for (const float angleDeg : angles) {
-            AlleyProbeResult probe;
-            const bool valid = probeThroughAlley(town, gap, gapT, angleDeg, townCfg.minAlleyLength,
-                                                 townCfg.maxAlleyLength, setback,
-                                                 townCfg.minAlleyCrossingAngleDeg,
-                                                 townCfg.minAlleyEndpointSpacing,
-                                                 townCfg.minAlleyCreatedArea,
-                                                 townCfg.minAlleySideRoadDist,
-                                                 townCfg.alleySideRoadSampleCount, defs, probe);
-            appendProbeLine(town, gap, gapT, angleDeg, townCfg.maxAlleyLength, setback,
-                            townCfg.minAlleyCrossingAngleDeg, townCfg.minAlleyEndpointSpacing,
-                            townCfg.minAlleyCreatedArea, townCfg.minAlleySideRoadDist,
-                            townCfg.alleySideRoadSampleCount, defs, valid, probeLines);
-
-            if (valid) {
-                bestOut       = probe;
-                bestOut.valid = true;
-                markAlleyGapChecked(town, gap);
-                return true;
-            }
-        }
-    }
-
-    markAlleyGapChecked(town, gap);
-    return false;
+    return candidates;
 }
 
 }  // namespace
 
-bool tryAddSecondaryRoad(Town& town, int queueIndex, float setback, const TownConfig& townCfg,
-                         const DefCache& defs, PlacementSearchLog& searchLog, int& outRoadId,
-                         int forceCellId) {
-    outRoadId = -1;
-    (void)searchLog;
-
-    const float minGapWidth = std::max(townCfg.minWallGapForAlley, setback * 2.f);
-    const int   failLimit   = townCfg.alleyFillFailLimit;
-
-    if (static_cast<int>(town.alleyProbesByQueueIndex.size()) <= queueIndex) {
-        town.alleyProbesByQueueIndex.resize(static_cast<std::size_t>(queueIndex + 1));
-    }
-    std::vector<AlleyProbeLine>& probeLines =
-        town.alleyProbesByQueueIndex[static_cast<std::size_t>(queueIndex)];
-    probeLines.clear();
-
-    std::vector<WallGap> allGaps;
-    collectAllPrimaryWallGaps(town, minGapWidth, allGaps);
-    if (allGaps.empty()) {
-        Logger::log("layout", "secondary_road_fail: queueIndex=" + std::to_string(queueIndex)
-                                  + " reason=no_wall_gaps min_gap=" + std::to_string(minGapWidth));
-        return false;
-    }
-
-    int cellId = forceCellId;
-    if (cellId < 0) {
-        cellId = pickCellForAlley(town, allGaps, failLimit);
-    } else {
-        markCellsWithNoUncheckedGaps(town, allGaps, failLimit);
-        if (cellId >= static_cast<int>(town.cells.size())
-            || town.cells[static_cast<std::size_t>(cellId)].alleyState == AlleyCellState::Finished
-            || cellHasBlockingPendingFills(town, cellId, failLimit)) {
-            Logger::log("layout", "secondary_road_fail: queueIndex=" + std::to_string(queueIndex)
-                                      + " cell=" + std::to_string(cellId)
-                                      + " reason=forced_cell_unavailable");
-            return false;
-        }
-    }
-
-    if (cellId < 0) {
-        Logger::log("layout", "secondary_road_fail: queueIndex=" + std::to_string(queueIndex)
-                                  + " reason=all_cells_finished");
-        return false;
-    }
-
-    WallGap gap{};
-    if (!pickNextUncheckedGap(allGaps, cellId, town, gap)) {
-        if (!cellHasBlockingPendingFills(town, cellId, failLimit)
-            && !cellHasUncheckedPrimaryAlleyGaps(town, cellId, allGaps)
-            && !cellHasUncheckedSecondaryHostAlleyGaps(town, cellId, allGaps)) {
-            town.cells[static_cast<std::size_t>(cellId)].alleyState = AlleyCellState::Finished;
-            if (town.activeAlleyCellId == cellId) {
-                town.activeAlleyCellId = -1;
-            }
-        }
-        Logger::log("layout", "secondary_road_fail: queueIndex=" + std::to_string(queueIndex)
-                                  + " cell=" + std::to_string(cellId)
-                                  + " reason=no_unchecked_gaps");
-        return false;
-    }
-
-    AlleyProbeResult best{};
-    const bool       placed =
-        probeWallGap(town, gap, setback, townCfg, defs, probeLines, best);
-
-    if (!placed) {
-        if (!cellHasUncheckedPrimaryAlleyGaps(town, cellId, allGaps)
-            && !cellHasUncheckedSecondaryHostAlleyGaps(town, cellId, allGaps)
-            && !cellHasBlockingPendingFills(town, cellId, failLimit)) {
-            town.cells[static_cast<std::size_t>(cellId)].alleyState = AlleyCellState::Finished;
-            if (town.activeAlleyCellId == cellId) {
-                town.activeAlleyCellId = -1;
-            }
-        }
-        Logger::log("layout",
-                    "secondary_road_fail: queueIndex=" + std::to_string(queueIndex) + " cell="
-                        + std::to_string(cellId) + " gap_id=" + std::to_string(gap.id)
-                        + " reason=no_valid_probe probes=" + std::to_string(probeLines.size()));
-        return false;
-    }
-
-    SecondaryRoadRecord record;
-    record.a                 = best.start;
-    record.b                 = best.end;
-    record.hostCellId        = cellId;
-    record.addedAtQueueIndex = queueIndex;
-    record.isThrough         = true;
-    town.secondaryRoadRecords.push_back(record);
-
-    Road road;
-    road.id                = static_cast<int>(town.roads.size());
-    road.a                 = record.a;
-    road.b                 = record.b;
-    road.cellA             = cellId;
-    road.cellB             = cellId;
-    road.hostCellId        = cellId;
-    road.isSecondary       = true;
-    road.addedAtQueueIndex = queueIndex;
-    town.roads.push_back(road);
-
-    assignSecondaryRoadInwards(town.roads.back(), town);
-    buildSecondaryRoadFrontageSegments(town.roads.back(), town, setback);
-
-    town.cells[static_cast<std::size_t>(cellId)].alleyState = AlleyCellState::Expanding;
-    town.activeAlleyCellId                                    = cellId;
-    outRoadId                                                 = road.id;
-
-    PendingAlleyFill pending;
-    pending.addedAtQueueIndex    = queueIndex;
-    pending.hostCellId           = cellId;
-    pending.consecutiveFillFails = 0;
-    town.pendingAlleyFills.push_back(pending);
-
-    Logger::log("layout",
-                "secondary_road: queueIndex=" + std::to_string(queueIndex) + " cell="
-                    + std::to_string(cellId) + " gap_id=" + std::to_string(gap.id) + " roadId="
-                    + std::to_string(outRoadId) + " host="
-                    + (isSecondaryHostGap(town, gap) ? "alley" : "primary") + " length="
-                    + std::to_string(best.length) + " gap_t=" + std::to_string(best.gapT)
-                    + " angle=" + std::to_string(best.angleDeg) + " probes="
-                    + std::to_string(probeLines.size()) + " checked_gaps="
-                    + std::to_string(town.checkedAlleyGaps.size()));
-    Logger::log("layout", "alley_pending: queueIndex=" + std::to_string(queueIndex) + " road="
-                              + std::to_string(outRoadId) + " cell=" + std::to_string(cellId)
-                              + " fails=0");
-    return true;
-}
-
 int resolveSecondaryRoadId(const Town& town, int addedAtQueueIndex) {
-    for (std::size_t i = 0; i < town.secondaryRoadRecords.size(); ++i) {
-        if (town.secondaryRoadRecords[i].addedAtQueueIndex != addedAtQueueIndex) {
-            continue;
+    for (const Road& road : town.roads) {
+        if (road.isSecondary && road.addedAtQueueIndex == addedAtQueueIndex) {
+            return road.id;
         }
-        return town.primaryRoadCount + static_cast<int>(i);
     }
     return -1;
 }
@@ -690,70 +748,28 @@ void syncPendingAlleyFills(Town& town, int targetCount) {
                            return pending.addedAtQueueIndex >= targetCount;
                        }),
         town.pendingAlleyFills.end());
-
-    town.pendingAlleyFills.erase(
-        std::remove_if(town.pendingAlleyFills.begin(), town.pendingAlleyFills.end(),
-                       [&](const PendingAlleyFill& pending) {
-                           for (const SecondaryRoadRecord& rec : town.secondaryRoadRecords) {
-                               if (rec.addedAtQueueIndex == pending.addedAtQueueIndex) {
-                                   return false;
-                               }
-                           }
-                           return true;
-                       }),
-        town.pendingAlleyFills.end());
-
-    if (town.activeAlleyCellId >= 0
-        && town.activeAlleyCellId < static_cast<int>(town.cells.size())) {
-        const Cell& cell = town.cells[static_cast<std::size_t>(town.activeAlleyCellId)];
-        if (cell.alleyState == AlleyCellState::Finished) {
-            bool hasPendingInCell = false;
-            for (const PendingAlleyFill& pending : town.pendingAlleyFills) {
-                if (pending.hostCellId == town.activeAlleyCellId) {
-                    hasPendingInCell = true;
-                    break;
-                }
-            }
-            if (!hasPendingInCell) {
-                town.activeAlleyCellId = -1;
-            }
-        }
-    } else {
-        town.activeAlleyCellId = -1;
-    }
-
-    if (town.activeAlleyCellId < 0 && !town.pendingAlleyFills.empty()) {
-        town.activeAlleyCellId = town.pendingAlleyFills.front().hostCellId;
-    }
 }
 
 bool hasBlockingPendingFills(const Town& town, int failLimit) {
-    if (town.activeAlleyCellId < 0) {
-        return false;
-    }
-    return cellHasBlockingPendingFills(town, town.activeAlleyCellId, failLimit);
+    return std::any_of(town.pendingAlleyFills.begin(), town.pendingAlleyFills.end(),
+                       [failLimit](const PendingAlleyFill& pending) {
+                           return pending.consecutiveFillFails < failLimit;
+                       });
 }
 
 int frontPendingAlleyIndex(const Town& town, int failLimit) {
-    if (town.activeAlleyCellId < 0) {
-        return -1;
-    }
-    for (int i = 0; i < static_cast<int>(town.pendingAlleyFills.size()); ++i) {
-        const PendingAlleyFill& pending =
-            town.pendingAlleyFills[static_cast<std::size_t>(i)];
-        if (pending.hostCellId == town.activeAlleyCellId
-            && pending.consecutiveFillFails < failLimit) {
-            return i;
+    for (std::size_t i = 0; i < town.pendingAlleyFills.size(); ++i) {
+        if (town.pendingAlleyFills[i].consecutiveFillFails < failLimit) {
+            return static_cast<int>(i);
         }
     }
     return -1;
 }
 
 int pendingAlleyIndexByQueueIndex(const Town& town, int addedAtQueueIndex) {
-    for (int i = 0; i < static_cast<int>(town.pendingAlleyFills.size()); ++i) {
-        if (town.pendingAlleyFills[static_cast<std::size_t>(i)].addedAtQueueIndex
-            == addedAtQueueIndex) {
-            return i;
+    for (std::size_t i = 0; i < town.pendingAlleyFills.size(); ++i) {
+        if (town.pendingAlleyFills[i].addedAtQueueIndex == addedAtQueueIndex) {
+            return static_cast<int>(i);
         }
     }
     return -1;
@@ -763,143 +779,231 @@ void recordAlleyFillSuccess(Town& town, int pendingIndex) {
     if (pendingIndex < 0 || pendingIndex >= static_cast<int>(town.pendingAlleyFills.size())) {
         return;
     }
-    PendingAlleyFill& pending =
-        town.pendingAlleyFills[static_cast<std::size_t>(pendingIndex)];
-    pending.consecutiveFillFails = 0;
-    const int roadId = resolveSecondaryRoadId(town, pending.addedAtQueueIndex);
-    Logger::log("layout", "alley_fill_ok: queueIndex=" + std::to_string(pending.addedAtQueueIndex)
-                              + " road=" + std::to_string(roadId) + " cell="
-                              + std::to_string(pending.hostCellId));
+    town.pendingAlleyFills.erase(town.pendingAlleyFills.begin() + pendingIndex);
 }
 
 void recordAlleyFillFailure(Town& town, int pendingIndex, int failLimit) {
     if (pendingIndex < 0 || pendingIndex >= static_cast<int>(town.pendingAlleyFills.size())) {
         return;
     }
-    PendingAlleyFill& pending =
-        town.pendingAlleyFills[static_cast<std::size_t>(pendingIndex)];
+    PendingAlleyFill& pending = town.pendingAlleyFills[static_cast<std::size_t>(pendingIndex)];
     ++pending.consecutiveFillFails;
-    const int roadId = resolveSecondaryRoadId(town, pending.addedAtQueueIndex);
-    Logger::log("layout",
-                "alley_pending: queueIndex=" + std::to_string(pending.addedAtQueueIndex) + " road="
-                    + std::to_string(roadId) + " cell=" + std::to_string(pending.hostCellId)
-                    + " fails=" + std::to_string(pending.consecutiveFillFails));
-
-    if (pending.consecutiveFillFails < failLimit) {
-        return;
+    if (pending.consecutiveFillFails >= failLimit) {
+        town.pendingAlleyFills.erase(town.pendingAlleyFills.begin() + pendingIndex);
     }
-
-    Logger::log("layout",
-                "alley_fill_exhausted: queueIndex=" + std::to_string(pending.addedAtQueueIndex)
-                    + " road=" + std::to_string(roadId) + " cell="
-                    + std::to_string(pending.hostCellId) + " fails="
-                    + std::to_string(pending.consecutiveFillFails)
-                    + " (non-blocking; center-out gap fill continues)");
 }
 
-void enqueuePendingAlleyFill(Town& town, int addedAtQueueIndex, int hostCellId) {
+void enqueuePendingAlleyFill(Town& town, int addedAtQueueIndex, int hostRoadId) {
     if (pendingAlleyIndexByQueueIndex(town, addedAtQueueIndex) >= 0) {
         return;
     }
-    PendingAlleyFill pending;
-    pending.addedAtQueueIndex    = addedAtQueueIndex;
-    pending.hostCellId           = hostCellId;
-    pending.consecutiveFillFails = 0;
-    town.pendingAlleyFills.push_back(pending);
-    town.activeAlleyCellId = hostCellId;
+    town.pendingAlleyFills.push_back({addedAtQueueIndex, hostRoadId, 0});
 }
 
-int pickAlternateAlleyCell(Town& town, float setback, const TownConfig& townCfg, int excludeCellId) {
-    if (excludeCellId < 0) {
-        return -1;
-    }
+bool tryAddSecondaryRoad(Town& town, int queueIndex, float setback, const TownConfig& townCfg,
+                         const DefCache& defs, PlacementSearchLog& /*searchLog*/, int& outRoadId,
+                         int forceRoadId, const std::vector<int>& /*junctionHops*/, int townSeed) {
+    PROFILE_SCOPE(ProfileScopeId::AlleyProbe);
+    outRoadId = -1;
 
-    const float minGapWidth = std::max(townCfg.minWallGapForAlley, setback * 2.f);
-    const int   failLimit   = townCfg.alleyFillFailLimit;
-
-    std::vector<WallGap> allGaps;
-    collectAllPrimaryWallGaps(town, minGapWidth, allGaps);
-    return pickNextActiveAlleyCell(town, allGaps, failLimit, excludeCellId);
-}
-
-void ensureActiveAlleyCell(Town& town, float setback, const TownConfig& townCfg) {
-    const float minGapWidth = std::max(townCfg.minWallGapForAlley, setback * 2.f);
-    const int   failLimit   = townCfg.alleyFillFailLimit;
-
-    std::vector<WallGap> allGaps;
-    collectAllPrimaryWallGaps(town, minGapWidth, allGaps);
-
-    if (town.activeAlleyCellId >= 0
-        && town.activeAlleyCellId < static_cast<int>(town.cells.size())) {
-        if (cellHasBlockingPendingFills(town, town.activeAlleyCellId, failLimit)) {
-            Logger::log("layout",
-                        "alley_active_cell: cell=" + std::to_string(town.activeAlleyCellId));
-            return;
-        }
-        const Cell& cell = town.cells[static_cast<std::size_t>(town.activeAlleyCellId)];
-        if (cell.alleyState != AlleyCellState::Finished
-            && (cellHasUncheckedPrimaryAlleyGaps(town, town.activeAlleyCellId, allGaps)
-                || cellHasUncheckedSecondaryHostAlleyGaps(town, town.activeAlleyCellId, allGaps))) {
-            Logger::log("layout",
-                        "alley_active_cell: cell=" + std::to_string(town.activeAlleyCellId));
-            return;
-        }
-    }
-
-    const int nextCell = pickNextActiveAlleyCell(town, allGaps, failLimit);
-    town.activeAlleyCellId = nextCell;
-    if (nextCell >= 0) {
-        Logger::log("layout", "alley_active_cell: cell=" + std::to_string(nextCell));
-    }
-}
-
-bool removeAlleysThroughSecondaryBuildings(Town& town) {
-    const std::size_t before = town.secondaryRoadRecords.size();
-    town.secondaryRoadRecords.erase(
-        std::remove_if(town.secondaryRoadRecords.begin(), town.secondaryRoadRecords.end(),
-                       [&](const SecondaryRoadRecord& rec) {
-                           if (!segmentIntersectsSecondaryFootprints(rec.a, rec.b, town)) {
-                               return false;
-                           }
-                           Logger::log("layout",
-                                       "alley_removed: queueIndex="
-                                           + std::to_string(rec.addedAtQueueIndex) + " cell="
-                                           + std::to_string(rec.hostCellId)
-                                           + " reason=through_secondary_building");
-                           return true;
-                       }),
-        town.secondaryRoadRecords.end());
-
-    if (town.secondaryRoadRecords.size() == before) {
+    if (town.urbanCoreMaxHop < 0) {
         return false;
     }
 
-    town.pendingAlleyFills.erase(
-        std::remove_if(town.pendingAlleyFills.begin(), town.pendingAlleyFills.end(),
-                       [&](const PendingAlleyFill& pending) {
-                           for (const SecondaryRoadRecord& rec : town.secondaryRoadRecords) {
-                               if (rec.addedAtQueueIndex == pending.addedAtQueueIndex) {
-                                   return false;
-                               }
-                           }
-                           return true;
-                       }),
-        town.pendingAlleyFills.end());
+    const float coreMaxDist = urbanCoreMaxDist(town);
 
-    rebuildSecondaryRoadsFromRecords(town);
-    syncAlleyCellStates(town);
-
-    if (town.activeAlleyCellId >= 0) {
-        bool hasPendingInActive = false;
-        for (const PendingAlleyFill& pending : town.pendingAlleyFills) {
-            if (pending.hostCellId == town.activeAlleyCellId) {
-                hasPendingInActive = true;
-                break;
-            }
-        }
-        if (!hasPendingInActive) {
-            town.activeAlleyCellId = -1;
+    std::vector<WallGap> allWallGaps;
+    collectWallGapsInDistRange(town, townCfg.minWallGapForAlley, coreMaxDist, allWallGaps);
+    int checkedSkipped = 0;
+    for (const WallGap& gap : allWallGaps) {
+        if (isAlleyGapChecked(town, gap)) {
+            ++checkedSkipped;
         }
     }
-    return true;
+
+    int undevelopedSkipped = 0;
+    for (const WallGap& gap : allWallGaps) {
+        if (isAlleyGapChecked(town, gap)) {
+            continue;
+        }
+        if (!bankHasBuildingOnSide(town, gap.roadId, gap.bankIndex)) {
+            ++undevelopedSkipped;
+        }
+    }
+
+    const std::vector<GapCandidate> gaps =
+        collectOrderedRoadGaps(town, townCfg.minWallGapForAlley, forceRoadId, coreMaxDist);
+    std::vector<float> angleSamples;
+    buildAngleSamples(townCfg.maxAlleyAngleDeg, townCfg.alleyAngleCount, angleSamples);
+
+    Logger::log("layout",
+                "alley_diag: begin queueIndex=" + std::to_string(queueIndex) + " force_road="
+                    + std::to_string(forceRoadId) + " wall_gaps=" + std::to_string(allWallGaps.size())
+                    + " candidates=" + std::to_string(gaps.size()) + " checked_skipped="
+                    + std::to_string(checkedSkipped) + " undeveloped_bank_skipped="
+                    + std::to_string(undevelopedSkipped) + " min_gap="
+                    + std::to_string(townCfg.minWallGapForAlley) + " min_len="
+                    + std::to_string(townCfg.minAlleyLength) + " max_len="
+                    + std::to_string(townCfg.maxAlleyLength) + " angles="
+                    + std::to_string(angleSamples.size()));
+
+    if (gaps.empty()) {
+        Logger::log("layout",
+                    "alley_diag: fail queueIndex=" + std::to_string(queueIndex)
+                        + " reason=no_candidates wall_gaps=" + std::to_string(allWallGaps.size())
+                        + " checked_skipped=" + std::to_string(checkedSkipped));
+        return false;
+    }
+
+    AlleyProbeStats totalStats;
+    int             gapsTried     = 0;
+    int             gapsMarkedDead = 0;
+
+    for (const GapCandidate& candidate : gaps) {
+        const WallGap& gap = candidate.gap;
+        ++gapsTried;
+        std::vector<float> gapTs;
+        buildGapTPositions(gap, townCfg.alleysPerUnitLength, gapTs);
+
+        std::vector<float> shuffledAngles = angleSamples;
+        std::vector<float> shuffledGapTs  = gapTs;
+        shuffleProbeOrder(shuffledAngles, shuffledGapTs, townSeed, queueIndex, gap);
+
+        bool            anyProbeValid = false;
+        AlleyProbeStats gapStats;
+
+        for (float gapT : shuffledGapTs) {
+            for (float angle : shuffledAngles) {
+                std::vector<SecondaryRoadRecord> records;
+                AlleyProbeViz                    failedViz;
+                if (!probeAlleyWithFallback(town, gap, gapT, angle, townCfg.minAlleyLength,
+                                            townCfg.maxAlleyLength, setback, townCfg, defs,
+                                            queueIndex, townSeed, records, &gapStats, &failedViz)) {
+                    if (queueIndex >= 0 && failedViz.valid) {
+                        recordAlleyProbe(town, queueIndex,
+                                         {failedViz.start, failedViz.end, false});
+                    }
+                    continue;
+                }
+
+                for (SecondaryRoadRecord& rec : records) {
+                    rec.addedAtQueueIndex = queueIndex;
+                    town.secondaryRoadRecords.push_back(rec);
+                }
+
+                rebuildSecondaryRoadsFromRecords(town, nullptr);
+                outRoadId = -1;
+                for (const Road& road : town.roads) {
+                    if (road.isSecondary && road.addedAtQueueIndex == queueIndex) {
+                        outRoadId = road.id;
+                    }
+                }
+
+                enqueuePendingAlleyFill(town, queueIndex, gap.roadId);
+                markAlleyGapChecked(town, gap);
+                anyProbeValid = true;
+                clearExhaustionAfterAlleyApply(town, gap.roadId, outRoadId);
+
+                if (queueIndex >= 0) {
+                    recordAlleyProbe(town, queueIndex, {records.front().a, records.back().b, true});
+                }
+
+                std::string alleyLog =
+                    "alley_added: queueIndex=" + std::to_string(queueIndex) + " host_road="
+                    + std::to_string(gap.roadId) + " bank=" + std::to_string(gap.bankIndex)
+                    + " gap_width=" + std::to_string(gap.width()) + " center_dist="
+                    + std::to_string(candidate.centerDist) + " segments="
+                    + std::to_string(records.size());
+                bool loggedThrough = false;
+                for (const SecondaryRoadRecord& rec : records) {
+                    if (rec.kind == AlleyPlacementKind::Turn) {
+                        alleyLog += " turn=1 turn_angle=" + std::to_string(rec.turnAngleDeg);
+                        break;
+                    }
+                    if (rec.kind == AlleyPlacementKind::DeadEnd) {
+                        alleyLog += " dead_end=1";
+                        break;
+                    }
+                    if (rec.isThrough && !loggedThrough) {
+                        alleyLog += " through=1";
+                        loggedThrough = true;
+                    }
+                }
+                Logger::log("layout", alleyLog);
+                if (loggedThrough) {
+                    Logger::log("layout",
+                                "alley_through: queueIndex=" + std::to_string(queueIndex)
+                                    + " segments=" + std::to_string(records.size()));
+                }
+                return outRoadId >= 0;
+            }
+        }
+
+        totalStats.probes += gapStats.probes;
+        totalStats.badDir += gapStats.badDir;
+        totalStats.noRayHit += gapStats.noRayHit;
+        totalStats.tooShort += gapStats.tooShort;
+        totalStats.tooLong += gapStats.tooLong;
+        totalStats.blockedByMain += gapStats.blockedByMain;
+        totalStats.setbackFail += gapStats.setbackFail;
+        totalStats.chainExhausted += gapStats.chainExhausted;
+        totalStats.thinSide += gapStats.thinSide;
+        totalStats.badAngle += gapStats.badAngle;
+        totalStats.endpointSpacing += gapStats.endpointSpacing;
+        totalStats.bankParallel += gapStats.bankParallel;
+        totalStats.depthStubFail += gapStats.depthStubFail;
+        totalStats.turnFail += gapStats.turnFail;
+
+        if (!anyProbeValid) {
+            markAlleyGapChecked(town, gap);
+            if (!bankHasUncheckedAlleyGaps(town, gap.roadId, gap.bankIndex,
+                                           townCfg.minWallGapForAlley, coreMaxDist)) {
+                if (RoadSideFrontage* side =
+                        town.roads[static_cast<std::size_t>(gap.roadId)].sideBank(gap.bankIndex)) {
+                    setBankExhausted(*side, AlleyDone);
+                }
+            }
+            ++gapsMarkedDead;
+            std::string failDetail;
+            appendAlleyProbeStatSummary(gapStats, failDetail);
+            Logger::log("layout",
+                        "alley_diag: gap_exhausted queueIndex=" + std::to_string(queueIndex)
+                            + " road=" + std::to_string(gap.roadId) + " bank="
+                            + std::to_string(gap.bankIndex) + " width="
+                            + std::to_string(gap.width()) + " center_dist="
+                            + std::to_string(candidate.centerDist) + failDetail);
+        }
+    }
+
+    std::string summary;
+    appendAlleyProbeStatSummary(totalStats, summary);
+    Logger::log("layout",
+                "alley_diag: fail queueIndex=" + std::to_string(queueIndex) + " gaps_tried="
+                    + std::to_string(gapsTried) + " gaps_marked_dead="
+                    + std::to_string(gapsMarkedDead) + summary);
+
+    return false;
+}
+
+bool removeAlleysThroughSecondaryBuildings(Town& town) {
+    bool removed = false;
+    for (const BuildingInstance& instance : town.buildingInstances) {
+        if (instance.placementMode != BuildingPlacementMode::SegmentGapFill || instance.footprints.empty()) {
+            continue;
+        }
+        const BuildingFootprint& footprint = instance.footprints[0];
+        const std::size_t before = town.secondaryRoadRecords.size();
+        town.secondaryRoadRecords.erase(
+            std::remove_if(town.secondaryRoadRecords.begin(), town.secondaryRoadRecords.end(),
+                           [&](const SecondaryRoadRecord& rec) {
+                               return segmentIntersectsMainFootprints(rec.a, rec.b, town)
+                                      || footprintOverlapsAlleys(footprint, town, 0.5f, instance.roadId);
+                           }),
+            town.secondaryRoadRecords.end());
+        removed = removed || town.secondaryRoadRecords.size() != before;
+    }
+    if (removed) {
+        rebuildSecondaryRoadsFromRecords(town);
+    }
+    return removed;
 }

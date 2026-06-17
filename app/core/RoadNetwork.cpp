@@ -347,7 +347,7 @@ bool roadEligibleForBridgeProcessing(const Road& road) {
     if (road.isSecondary || road.isTerrainCorridor || road.isBridge) {
         return false;
     }
-    if (road.cellA == -1 && road.cellB == -1) {
+    if (road.length() < kMinSegmentLen) {
         return false;
     }
     return true;
@@ -647,8 +647,6 @@ void appendCorridorRoads(Town& town, const TerrainAtlas& atlas, const Config& co
                 road.a                 = a;
                 road.b                 = b;
                 road.isTerrainCorridor = true;
-                road.cellA             = -1;
-                road.cellB             = -1;
                 town.roads.push_back(road);
                 ++emitted;
             }
@@ -713,8 +711,6 @@ void splitRoadsAtIntersections(Town& town, float endpointEps) {
             Road segment  = source;
             segment.a     = lerpVec(source.a, source.b, t0);
             segment.b     = lerpVec(source.a, source.b, t1);
-            segment.cellA = source.cellA;
-            segment.cellB = source.cellB;
             resetRoadFrontage(segment);
             splitRoads.push_back(segment);
         }
@@ -765,8 +761,6 @@ int splitRoadsAtForbiddenBoundary(Town& town, const TerrainAtlas& terrain) {
             Road segment  = source;
             segment.a     = lerpVec(source.a, source.b, t0);
             segment.b     = lerpVec(source.a, source.b, t1);
-            segment.cellA = source.cellA;
-            segment.cellB = source.cellB;
             resetRoadFrontage(segment);
             splitRoads.push_back(segment);
         }
@@ -898,8 +892,6 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
         bridge.a         = bridgeA;
         bridge.b         = bridgeB;
         bridge.isBridge  = true;
-        bridge.cellA     = -1;
-        bridge.cellB     = -1;
         town.roads.push_back(bridge);
         ++bridgesCreated;
         if (snapped) {

@@ -24,14 +24,15 @@ Split into **Step 1** (visual + bake) and **Step 1.5 / 1b** (topology + placemen
 
 ### Step 1.5 / Phase 1b — Topology and placement
 
-**Goal:** Real road splits, buildability queries, cell tagging.
+**Goal:** Real road splits, buildability queries, and road-only placement validation.
 
 | Task | Status |
 |------|--------|
 | Split `Road` at water + re-index junctions | Done (bridges: [`terrain-bridges.md`](terrain-bridges.md)) |
-| `rebuildAllCellBoundaries` after split; log failures | Not started |
-| `isBuildable()` in footprint validation | Not started |
-| `Cell.buildable` + `dominantTerrain` at town build | Not started |
+| Cell boundary rebuild after split | Obsolete — road-only model removed cells |
+| `isBuildable()` in footprint/plot validation | Done — `polygonBuildable` corners + edges; terrain threaded from `BuildingPlacer::sync` |
+| Land-aware road bank inwards | Done — `assignRoadSideInwards(town, terrain)` disables water-facing banks |
+| Road-hit depth cap for plots | Done — nearest inward road hit / 2 |
 
 **Exit criteria:** No building footprints inside water or rivers on test map.
 
@@ -42,7 +43,7 @@ Split into **Step 1** (visual + bake) and **Step 1.5 / 1b** (topology + placemen
 | Task | Status |
 |------|--------|
 | Forest / hills / mountain region polygons in bake | Done (debug + future scoring) |
-| Cell `plainsCoverage` from grid | Not started |
+| Road/segment terrain coverage from grid | Not started |
 | Extend `buildings.yml` with terrain fields | Not started |
 | Split `resource` → `mine` + `lumber_camp` (or equivalent) | Not started |
 | Terrain term in `scoreSegmentForZone` | Not started |
@@ -67,7 +68,7 @@ Split into **Step 1** (visual + bake) and **Step 1.5 / 1b** (topology + placemen
 
 ## Phase 4 — Roads & corridors
 
-**Goal:** Rivers and coast shape connectivity; corridor roads subdivide cells.
+**Goal:** Rivers and coast shape connectivity; corridor roads shape the road graph.
 
 Detailed pipeline: [terrain-corridor-roads.md](terrain-corridor-roads.md). Bridges: [terrain-bridges.md](terrain-bridges.md).
 
@@ -75,14 +76,14 @@ Detailed pipeline: [terrain-corridor-roads.md](terrain-corridor-roads.md). Bridg
 |------|--------|
 | Shore + river corridor graphs on atlas (config insets/spacing) | Done |
 | Emit corridor `Road`s; split at interior intersections | Done |
-| Face extraction → replace `town.cells`; `voronoiParentId` | Done |
+| Road-only model removes `town.cells` and face extraction | Done ([road-only-model.md](road-only-model.md)) |
 | Split at forbidden boundary; detect legal crossings → `isBridge` | Done |
 | Bridge rendering (brown) + snap chord | Done |
 | Parallel-to-river bias in secondary road probe | Not started |
 | Parallel-to-shore bias (optional) | Not started |
 | Voronoi site bias away from water (optional) | Not started |
 
-**Exit criteria:** Corridor roads on map with junctions at Voronoi crosses; coastal strips subdivide; buildings on subdivided frontage.
+**Exit criteria:** Corridor roads on map with junctions at Voronoi crosses; buildings use road-bank frontage and terrain validation.
 
 ## Phase 5 — Polish
 
@@ -106,9 +107,9 @@ Phase 5 anytime after Phase 1
 
 | Feature | Location | Notes |
 |---------|----------|-------|
-| Zone scoring | `FrontageZones.cpp` | urban / residential / rural |
-| Gap-fill band | `BuildingPlacer.cpp`, `FrontageGapFill.cpp` | center-out by cell centroid |
-| Alley fill + pending | `SecondaryRoadPlacement.cpp` | exhausted pending stays non-blocking; general gap fill fills alleys |
+| Zone scoring | `FrontageZones.cpp` | urban / residential / rural; hop gates via `suburbanMaxHop` |
+| Hop-ring growth | `GrowthRings.cpp`, `BuildingPlacer.cpp` | See [`placement-model.md`](placement-model.md); code drift: gap-fill order/band gating |
+| Gap-fill + alleys | `FrontageGapFill.cpp`, `SecondaryRoadPlacement.cpp` | road-bank gap-fill; alleys on primary+secondary in core hop range |
 | Protected plots | `PlotGeometry.cpp`, `buildings.yml` | `allow_plot_fill: false` |
 
 When terrain phases touch these files, update this table if behaviour changes.

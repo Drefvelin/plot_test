@@ -12,7 +12,7 @@ enum class DimReject {
     RoadTooShort,
     DepthRatioExceeded,
     AreaOutOfBand,
-    DepthExceedsCell,
+    DepthExceedsRoadHit,
 };
 
 enum class PlotOrientation {
@@ -27,6 +27,8 @@ struct PlotDimensions {
     bool  valid    = false;
 };
 
+struct TerrainAtlas;
+
 constexpr float kBuildingAspectMax = 2.f;  // neither side more than 2x the other
 
 bool aspectRatioOk(float frontage, float depth, float maxRatio = kBuildingAspectMax);
@@ -38,8 +40,9 @@ void sampleOrientationOrder(int buildingId, int townSeed, PlotOrientation& first
 PlotDimensions computePlotDimensionsForRoad(const DefCache& defs, const std::string& buildingType,
                                             float targetArea, PlotOrientation orient,
                                             const Vec2& roadStart, const Vec2& edgeDir,
-                                            float maxFrontage, const Vec2& inward, const Cell& cell,
-                                            float maxDepthToFrontRatio, float frontageSetback,
+                                            float maxFrontage, const Vec2& inward, int hostRoadId,
+                                            int bankIndex, Town& town, float maxDepthToFrontRatio,
+                                            float frontageSetback,
                                             DimReject* rejectOut = nullptr,
                                             const SizeBand* plotAreaBand = nullptr);
 const char* rejectName(DimReject reason);

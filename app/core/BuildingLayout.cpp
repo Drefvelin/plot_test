@@ -179,7 +179,7 @@ Vec2 plotCenterToRoadDir(const Plot& plot, const Town& town) {
         Vec2        origin{};
         Vec2        farEnd{};
         Vec2        edgeDir{};
-        if (roadFrameForCell(road, plot.cellId, origin, farEnd, edgeDir)) {
+        if (roadFrameForBank(road, plot.roadBank, origin, farEnd, edgeDir)) {
             const Vec2 nearest = nearestPointOnSegment(plotCenter, origin, farEnd);
             const Vec2 dir     = nearest - plotCenter;
             if (dir.length() >= 1e-4f) {
@@ -187,7 +187,7 @@ Vec2 plotCenterToRoadDir(const Plot& plot, const Town& town) {
             }
         }
 
-        if (const RoadSideFrontage* side = road.sideForCell(plot.cellId)) {
+        if (const RoadSideFrontage* side = road.sideBank(plot.roadBank)) {
             if (side->inward.length() >= 1e-4f) {
                 return (side->inward * -1.f).normalized();
             }
@@ -921,7 +921,7 @@ void refreshBuildingDoorEdges(Town& town, const DefCache& /*defs*/) {
     for (BuildingInstance& instance : town.buildingInstances) {
         for (BuildingFootprint& footprint : instance.footprints) {
             if (instance.placementMode == BuildingPlacementMode::SegmentGapFill) {
-                assignGapFillDoorEdge(footprint, instance.roadId, instance.cellId, town);
+                assignGapFillDoorEdge(footprint, instance.roadId, instance.roadBank, town);
                 continue;
             }
             const BuildingTemplateRules rules = templateRulesFromFootprint(footprint);
@@ -930,7 +930,7 @@ void refreshBuildingDoorEdges(Town& town, const DefCache& /*defs*/) {
     }
 }
 
-Vec2 buildingCenterToRoadOnSegment(const BuildingFootprint& footprint, int roadId, int cellId,
+Vec2 buildingCenterToRoadOnSegment(const BuildingFootprint& footprint, int roadId, int bankIndex,
                                    const Town& town) {
     Vec2 buildingCenter = footprintCenter(footprint);
     if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
@@ -941,7 +941,7 @@ Vec2 buildingCenterToRoadOnSegment(const BuildingFootprint& footprint, int roadI
     Vec2        origin{};
     Vec2        farEnd{};
     Vec2        edgeDir{};
-    if (!roadFrameForCell(road, cellId, origin, farEnd, edgeDir)) {
+    if (!roadFrameForBank(road, bankIndex, origin, farEnd, edgeDir)) {
         return {};
     }
 
@@ -953,8 +953,8 @@ Vec2 buildingCenterToRoadOnSegment(const BuildingFootprint& footprint, int roadI
     return dir.normalized();
 }
 
-void assignGapFillDoorEdge(BuildingFootprint& footprint, int roadId, int cellId, const Town& town) {
-    const Vec2 towardRoad     = buildingCenterToRoadOnSegment(footprint, roadId, cellId, town);
+void assignGapFillDoorEdge(BuildingFootprint& footprint, int roadId, int bankIndex, const Town& town) {
+    const Vec2 towardRoad     = buildingCenterToRoadOnSegment(footprint, roadId, bankIndex, town);
     const Vec2 buildingCenter = footprintCenter(footprint);
 
     int   bestEdge  = 0;
