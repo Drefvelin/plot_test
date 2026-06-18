@@ -110,11 +110,15 @@ void Hud::setZoneTintControl(bool* zoneTintEnabled) {
 
 }
 
+void Hud::setBiomePlotControl(bool* biomePlotsEnabled) {
+    biomePlotsEnabled_ = biomePlotsEnabled;
+}
 
-
-void Hud::setPlacementFailures(int count, int placedCount, const Town& town) {
+void Hud::setPlacementFailures(int count, int moveFailures, int placedCount, const Town& town) {
 
     placementFailures_ = count;
+
+    moveFailures_        = moveFailures;
 
     placedCount_       = placedCount;
 
@@ -150,6 +154,9 @@ void Hud::updateLayout(const sf::Vector2u& windowSize) {
 
     zoneToggleLeft_    = terrainToggleLeft_ - toggleGap_ - toggleWidth_;
 
+    biomeToggleTop_  = zoneToggleTop_;
+    biomeToggleLeft_ = zoneToggleLeft_ - toggleGap_ - toggleWidth_;
+
 }
 
 
@@ -173,6 +180,13 @@ void Hud::cycleTerrainOverlayMode() const {
 
 
 
+void Hud::toggleBiomePlots() const {
+    if (biomePlotsEnabled_ == nullptr) {
+        return;
+    }
+    *biomePlotsEnabled_ = !*biomePlotsEnabled_;
+}
+
 void Hud::toggleZoneTint() const {
 
     if (zoneTintEnabled_ == nullptr) {
@@ -185,7 +199,9 @@ void Hud::toggleZoneTint() const {
 
 }
 
-
+bool Hud::biomePlotToggleHitTest(float x, float y) const {
+    return pointInRect(x, y, biomeToggleLeft_, biomeToggleTop_, toggleWidth_, toggleHeight_);
+}
 
 int Hud::countFromPixelX(int pixelX) const {
 
@@ -252,6 +268,12 @@ bool Hud::handleEvent(const sf::Event& event, const sf::RenderWindow& window) {
 
 
     if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left) {
+
+        if (biomePlotToggleHitTest(static_cast<float>(event.mouseButton.x),
+                                   static_cast<float>(event.mouseButton.y))) {
+            toggleBiomePlots();
+            return true;
+        }
 
         if (zoneToggleHitTest(static_cast<float>(event.mouseButton.x),
 
@@ -417,7 +439,9 @@ void Hud::draw(sf::RenderWindow& window) const {
 
                      zonesOn, true, fontPtr);
 
-
+    const bool biomeOn = biomePlotsEnabled_ != nullptr && *biomePlotsEnabled_;
+    drawToggleButton(window, biomeToggleLeft_, biomeToggleTop_, toggleWidth_, toggleHeight_,
+                     "Biome plots", biomeOn, true, fontPtr);
 
     if (fontLoaded_) {
 
@@ -473,6 +497,24 @@ void Hud::draw(sf::RenderWindow& window) const {
 
 
 
+        sf::Text moveFailureLabel;
+
+        moveFailureLabel.setFont(font_);
+
+        moveFailureLabel.setCharacterSize(13);
+
+        moveFailureLabel.setFillColor(moveFailures_ > 0 ? sf::Color(220, 80, 80)
+
+                                                        : sf::Color(120, 180, 120));
+
+        moveFailureLabel.setPosition(kMargin, trackTop_ + trackHeight_ + 18.f);
+
+        moveFailureLabel.setString("Move failures: " + std::to_string(moveFailures_));
+
+        window.draw(moveFailureLabel);
+
+
+
         sf::Text bandLabel;
 
         bandLabel.setFont(font_);
@@ -481,7 +523,7 @@ void Hud::draw(sf::RenderWindow& window) const {
 
         bandLabel.setFillColor(sf::Color(180, 180, 190));
 
-        bandLabel.setPosition(kMargin, trackTop_ + trackHeight_ + 22.f);
+        bandLabel.setPosition(kMargin, trackTop_ + trackHeight_ + 36.f);
 
         if (placementTown_ != nullptr) {
             bandLabel.setString(formatPlacementBandDistRanges(*placementTown_));

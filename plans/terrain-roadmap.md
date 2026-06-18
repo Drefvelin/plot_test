@@ -42,12 +42,14 @@ Split into **Step 1** (visual + bake) and **Step 1.5 / 1b** (topology + placemen
 
 | Task | Status |
 |------|--------|
-| Forest / hills / mountain region polygons in bake | Done (debug + future scoring) |
+| Forest / hills / plains minority outlines + `majorityLandKind` in bake | Done |
+| `buildings.yml` terrain fields + `DefCache` parsing | Done |
+| `FrontierManager` border + terrain-scan frontiers | Done |
+| Rural terrain-first (`terrain_scan` / `frontier_loose_fallback`) | Done |
+| Border placement hug + band styles | Done |
+| `type: any` routing (`tryPlaceAnyOnRoads`) | Done |
 | Road/segment terrain coverage from grid | Not started |
-| Extend `buildings.yml` with terrain fields | Not started |
-| Split `resource` → `mine` + `lumber_camp` (or equivalent) | Not started |
 | Terrain term in `scoreSegmentForZone` | Not started |
-| Farm hard/soft plains rules | Not started |
 
 **Exit criteria:** Farms cluster on plains; resource types score near correct biomes.
 
@@ -55,14 +57,11 @@ Split into **Step 1** (visual + bake) and **Step 1.5 / 1b** (topology + placemen
 
 **Goal:** Watermills, docks, mines on features.
 
-| Task | Status |
-|------|--------|
-| River centerlines in bake | Not started |
-| Shoreline polylines in bake | Not started |
+| River / shoreline outlines in bake | Done |
+| Border frontier (frontage-first) + `tryPlaceBorderPlot` (hug + band) | Done |
+| Fisher hut / watermill `type: any` border placement | Done (strict river may fail if no slots) |
+| Mine hills proximity via terrain-scan frontier | Done |
 | `FeatureAnchor` placement mode | Not started |
-| Watermill on river + road proximity | Not started |
-| Fisherman / dock on shoreline | Not started |
-| Mine on hills edge | Not started |
 
 **Exit criteria:** At least one of each anchor type places correctly on the test map.
 

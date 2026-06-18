@@ -1,12 +1,17 @@
 #include "BuildingLayout.h"
 
-#include "Logger.h"
+#include "FrontierManager.h"
 #include "PlotGeometry.h"
+#include "TerrainAtlas.h"
+#include "TerrainPlacement.h"
+
+#include "Logger.h"
 #include "Units.h"
 
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <sstream>
 
 namespace {
 
@@ -156,9 +161,59 @@ void makeRotatedRect(const Vec2& center, float width, float height, float angleR
     setFootprintCorners(out, p0, p1, p2, p3);
 }
 
+void makeOrthogonalRectCentered(const Vec2& center, const Vec2& axisU, float width, float height,
+                                BuildingFootprint& out) {
+    const Vec2 u = axisU.normalized();
+    const Vec2 v = perpendicular(u);
+    makeAxisAlignedRectCentered(center, u, v, width, height, out);
+}
+
+void rotateVec(Vec2& v, float angleRad) {
+    const float c = std::cos(angleRad);
+    const float s = std::sin(angleRad);
+    const float x = v.x * c - v.y * s;
+    const float y = v.x * s + v.y * c;
+    v             = {x, y};
+}
+
+Vec2 plotRoadAxisU(const Plot& plot) {
+    const Vec2  u   = plot.corners[1] - plot.corners[0];
+    const float len = u.length();
+    if (len < 1e-4f) {
+        return {1.f, 0.f};
+    }
+    return u * (1.f / len);
+}
+
+void plotOrthogonalAxes(const Plot& plot, float rotationRad, Vec2& axisU, Vec2& axisV) {
+    axisU = plotRoadAxisU(plot);
+    axisV = perpendicular(axisU);
+    if (std::abs(rotationRad) > 1e-4f) {
+        rotateVec(axisU, rotationRad);
+        rotateVec(axisV, rotationRad);
+    }
+}
+
 Vec2 plotCenterFromCorners(const Plot& plot) {
     return {(plot.corners[0].x + plot.corners[1].x + plot.corners[2].x + plot.corners[3].x) * 0.25f,
             (plot.corners[0].y + plot.corners[1].y + plot.corners[2].y + plot.corners[3].y) * 0.25f};
+}
+
+Vec2 plotBankInward(const Plot& plot) {
+    Vec2 bankIn = perpendicular(plotRoadAxisU(plot));
+    const Vec2 frontMid = (plot.corners[0] + plot.corners[1]) * 0.5f;
+    const Vec2 plotCtr  = plotCenterFromCorners(plot);
+    if (bankIn.dot(plotCtr - frontMid) < 0.f) {
+        bankIn = bankIn * -1.f;
+    }
+    return bankIn;
+}
+
+void ensureAxisVAlong(const Vec2& direction, Vec2& axisU, Vec2& axisV) {
+    if (axisV.dot(direction) < 0.f) {
+        axisU = axisU * -1.f;
+        axisV = axisV * -1.f;
+    }
 }
 
 Vec2 nearestPointOnSegment(const Vec2& p, const Vec2& a, const Vec2& b) {
@@ -321,14 +376,6 @@ void assignDoorEdge(BuildingFootprint& footprint, const Plot& plot, const Town& 
                     std::to_string(bestScore));
 }
 
-void rotateVec(Vec2& v, float angleRad) {
-    const float c = std::cos(angleRad);
-    const float s = std::sin(angleRad);
-    const float x = v.x * c - v.y * s;
-    const float y = v.x * s + v.y * c;
-    v             = {x, y};
-}
-
 BuildingTemplateRules defaultTemplateRules() {
     BuildingTemplateRules rules;
     rules.edgePlacement = true;
@@ -341,19 +388,14 @@ void pickAxes(const Plot& plot, const Vec2& anchor, const BuildingTemplateRules&
         const Vec2 plotCtr  = plotCenterFromCorners(plot);
         Vec2       toCenter = plotCtr - anchor;
         if (toCenter.length() < 1e-4f) {
-            toCenter = (plot.corners[3] - plot.corners[0]).normalized();
+            toCenter = plotBankInward(plot);
         } else {
             toCenter = toCenter.normalized();
         }
         axisU = toCenter;
         axisV = perpendicular(axisU);
     } else {
-        axisU = (plot.corners[1] - plot.corners[0]).normalized();
-        axisV = (plot.corners[3] - plot.corners[0]).normalized();
-    }
-    if (std::abs(axisRotation) > 1e-4f) {
-        rotateVec(axisU, axisRotation);
-        rotateVec(axisV, axisRotation);
+        plotOrthogonalAxes(plot, axisRotation, axisU, axisV);
     }
 }
 
@@ -387,8 +429,10 @@ void appendDoorMarker(sf::VertexArray& mesh, const BuildingFootprint& footprint,
 }
 
 bool tryMainRoadFootprint(const Plot& plot, const BuildingSides& sides, BuildingFootprint& out) {
-    const Vec2 edgeDir = (plot.corners[1] - plot.corners[0]).normalized();
-    const Vec2 inward  = (plot.corners[3] - plot.corners[0]).normalized();
+    Vec2 axisU{};
+    Vec2 axisV{};
+    plotOrthogonalAxes(plot, 0.f, axisU, axisV);
+    ensureAxisVAlong(plotBankInward(plot), axisU, axisV);
 
     const float maxDepth     = plot.depth * kMainMaxDepthShare;
     const float scaleSteps[] = {1.f, 0.92f, 0.84f, 0.76f, 0.68f, 0.6f};
@@ -402,14 +446,11 @@ bool tryMainRoadFootprint(const Plot& plot, const BuildingSides& sides, Building
             continue;
         }
 
-        const Vec2 frontMid   = (plot.corners[0] + plot.corners[1]) * 0.5f;
-        const Vec2 frontRight = frontMid + edgeDir * (frontage * 0.5f);
-        const Vec2 frontLeft  = frontMid - edgeDir * (frontage * 0.5f);
-        const Vec2 backRight  = frontRight + inward * depth;
-        const Vec2 backLeft   = frontLeft + inward * depth;
+        const Vec2 frontMid = (plot.corners[0] + plot.corners[1]) * 0.5f;
+        const Vec2 anchor   = frontMid + axisV * (depth * 0.5f);
 
         BuildingFootprint candidate;
-        setFootprintCorners(candidate, frontLeft, frontRight, backRight, backLeft);
+        makeOrthogonalRectCentered(anchor, axisU, frontage, depth, candidate);
         if (footprintInsidePlot(candidate, plot)) {
             const BuildingFootprint meta = out;
             out                            = candidate;
@@ -487,8 +528,8 @@ struct PlacementCandidate {
 
 void appendCornerCandidates(const Plot& plot, const BuildingTemplateRules& rules, bool roadFrontOnly,
                             std::vector<PlacementCandidate>& candidates) {
-    const Vec2 edgeDir = (plot.corners[1] - plot.corners[0]).normalized();
-    const Vec2 inward  = (plot.corners[3] - plot.corners[0]).normalized();
+    const Vec2 edgeDir = plotRoadAxisU(plot);
+    const Vec2 inward  = plotBankInward(plot);
 
     const Vec2 anchors[4] = {
         plot.corners[0] + edgeDir * kEdgeInset + inward * kEdgeInset,
@@ -509,8 +550,10 @@ void appendCornerCandidates(const Plot& plot, const BuildingTemplateRules& rules
 }
 
 bool tryMainCornerFootprint(const Plot& plot, const BuildingSides& sides, BuildingFootprint& out) {
-    const Vec2 edgeDir = (plot.corners[1] - plot.corners[0]).normalized();
-    const Vec2 inward  = (plot.corners[3] - plot.corners[0]).normalized();
+    Vec2 axisU{};
+    Vec2 axisV{};
+    plotOrthogonalAxes(plot, 0.f, axisU, axisV);
+    ensureAxisVAlong(plotBankInward(plot), axisU, axisV);
 
     const float maxDepth     = plot.depth * kMainMaxDepthShare;
     const float scaleSteps[] = {1.f, 0.92f, 0.84f, 0.76f, 0.68f, 0.6f};
@@ -530,22 +573,17 @@ bool tryMainCornerFootprint(const Plot& plot, const BuildingSides& sides, Buildi
         }
 
         struct CornerTry {
-            Vec2 frontLeft;
+            Vec2 origin;
         };
 
         const CornerTry corners[] = {
-            {plot.corners[0] + edgeDir * kEdgeInset + inward * kEdgeInset},
-            {plot.corners[1] - edgeDir * kEdgeInset + inward * kEdgeInset - edgeDir * frontage},
+            {plot.corners[0] + axisU * kEdgeInset + axisV * kEdgeInset},
+            {plot.corners[1] - axisU * (frontage + kEdgeInset) + axisV * kEdgeInset},
         };
 
         for (const CornerTry& corner : corners) {
-            const Vec2 frontLeft  = corner.frontLeft;
-            const Vec2 frontRight = frontLeft + edgeDir * frontage;
-            const Vec2 backRight  = frontRight + inward * depth;
-            const Vec2 backLeft   = frontLeft + inward * depth;
-
             BuildingFootprint candidate;
-            setFootprintCorners(candidate, frontLeft, frontRight, backRight, backLeft);
+            makeAxisAlignedRect(corner.origin, axisU, axisV, frontage, depth, candidate);
             if (!footprintInsidePlot(candidate, plot)) {
                 continue;
             }
@@ -605,11 +643,70 @@ bool tryPlaceAtAnchor(const Plot& plot, const Vec2& anchor, bool centered,
     return false;
 }
 
+bool tryMainBackEdgeFootprint(const Plot& plot, const BuildingSides& sides, BuildingFootprint& out) {
+    if (!isHugTrapezoidPlot(plot)) {
+        return false;
+    }
+    const Vec2 backMid     = (plot.corners[2] + plot.corners[3]) * 0.5f;
+    const Vec2 frontMid    = (plot.corners[0] + plot.corners[1]) * 0.5f;
+    Vec2       towardBack  = backMid - frontMid;
+    if (towardBack.length() < 1e-4f) {
+        towardBack = plotBankInward(plot);
+    } else {
+        towardBack = towardBack.normalized();
+    }
+
+    constexpr float kQuarterTurnRad = 1.57079632679f;
+    const float     rotations[]     = {0.f, kQuarterTurnRad};
+
+    const float scaleSteps[] = {1.f, 0.92f, 0.84f, 0.76f, 0.68f, 0.6f};
+    float       bestScore    = 1e30f;
+    BuildingFootprint best;
+    bool found = false;
+
+    for (const float rotation : rotations) {
+        Vec2 axisU{};
+        Vec2 axisV{};
+        plotOrthogonalAxes(plot, rotation, axisU, axisV);
+        ensureAxisVAlong(towardBack, axisU, axisV);
+
+        for (const float scale : scaleSteps) {
+            const float frontage = sides.longSide * scale;
+            const float depth    = sides.shortSide * scale;
+            if (frontage < 2.f || depth < 2.f) {
+                continue;
+            }
+            const Vec2 anchor = backMid - axisV * depth * 0.5f;
+            BuildingFootprint candidate;
+            makeOrthogonalRectCentered(anchor, axisU, frontage, depth, candidate);
+            if (!footprintInsidePlot(candidate, plot)) {
+                continue;
+            }
+            const Vec2 fpCenter = footprintCenter(candidate);
+            const float score   = (plotCenterFromCorners(plot) - fpCenter).length();
+            if (score < bestScore) {
+                bestScore           = score;
+                best                = candidate;
+                best.placedShortLen = depth;
+                best.placedLongLen  = frontage;
+                found               = true;
+            }
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    const BuildingFootprint meta = out;
+    out                          = best;
+    preserveFootprintMeta(meta, out);
+    return true;
+}
+
 std::vector<PlacementCandidate> collectPlacementCandidates(const Plot& plot,
                                                            const BuildingTemplateRules& rules,
                                                            bool isMain) {
-    const Vec2 edgeDir = (plot.corners[1] - plot.corners[0]).normalized();
-    const Vec2 inward  = (plot.corners[3] - plot.corners[0]).normalized();
+    const Vec2 edgeDir = plotRoadAxisU(plot);
+    const Vec2 inward  = plotBankInward(plot);
     const Vec2 plotCtr = plotCenterFromCorners(plot);
 
     std::vector<PlacementCandidate> candidates;
@@ -700,6 +797,9 @@ bool placeFootprintFromTemplate(const Plot& plot, const BuildingSides& sides,
                                 const BuildingTemplateRules& rules,
                                 const std::vector<BuildingFootprint>& placed, int buildingId,
                                 int townSeed, int salt, bool isMain, BuildingFootprint& out) {
+    if (isMain && rules.backEdgePlacement && isHugTrapezoidPlot(plot)) {
+        return tryMainBackEdgeFootprint(plot, sides, out);
+    }
     if (isMain && rules.edgePlacement && !rules.middlePlacement) {
         if (rules.cornerPlacement) {
             if (tryMainCornerFootprint(plot, sides, out)) {
@@ -876,6 +976,7 @@ void copyTemplateRulesToFootprint(const BuildingTemplateRules& rules, BuildingFo
     footprint.tmplEdgePlacement    = rules.edgePlacement;
     footprint.tmplMiddlePlacement  = rules.middlePlacement;
     footprint.tmplCornerPlacement  = rules.cornerPlacement;
+    footprint.tmplBackEdgePlacement = rules.backEdgePlacement;
 }
 
 bool layoutBuildingsOnPlot(const Plot& plot, const Town& town,
@@ -997,12 +1098,17 @@ void removeSecondariesOverlappingMain(Town& town, const BuildingFootprint& newMa
     }
 }
 
-void appendBuildingFootprintOutlines(Town& town, float pixelsPerUnit) {
+void appendBuildingFootprintOutlines(
+    sf::VertexArray& mesh, const Town& town, float pixelsPerUnit,
+    const std::function<bool(const BuildingInstance&)>& includeInstance) {
     constexpr float kOutlineUnits = 0.35f;
     const sf::Color outlineColor(255, 0, 0);
     const float     thicknessPx = units::toPixels(kOutlineUnits, pixelsPerUnit);
 
     for (const BuildingInstance& instance : town.buildingInstances) {
+        if (includeInstance && !includeInstance(instance)) {
+            continue;
+        }
         for (const BuildingFootprint& footprint : instance.footprints) {
             Vec2 pxCorners[4];
             for (int i = 0; i < 4; ++i) {
@@ -1010,10 +1116,469 @@ void appendBuildingFootprintOutlines(Town& town, float pixelsPerUnit) {
                                 units::toPixels(footprint.corners[i].y, pixelsPerUnit)};
             }
             for (int i = 0; i < 4; ++i) {
-                appendThickSegment(town.buildingOutlineMesh, pxCorners[i],
-                                   pxCorners[(i + 1) % 4], thicknessPx, outlineColor);
+                appendThickSegment(mesh, pxCorners[i], pxCorners[(i + 1) % 4], thicknessPx,
+                                   outlineColor);
             }
-            appendDoorMarker(town.buildingOutlineMesh, footprint, pixelsPerUnit);
+            appendDoorMarker(mesh, footprint, pixelsPerUnit);
         }
     }
+}
+
+void appendBuildingFootprintOutlines(Town& town, float pixelsPerUnit) {
+    appendBuildingFootprintOutlines(town.buildingOutlineMesh, town, pixelsPerUnit);
+}
+
+void BorderHugRejectStats::record(BorderHugReject reason) {
+    switch (reason) {
+    case BorderHugReject::TooSmall:
+        ++tooSmall;
+        break;
+    case BorderHugReject::BorderMaxDist:
+        ++borderMaxDist;
+        break;
+    case BorderHugReject::RoadCross:
+        ++roadCross;
+        break;
+    case BorderHugReject::Overlap:
+        ++overlap;
+        break;
+    case BorderHugReject::FrontageTooWide:
+        ++frontageTooWide;
+        break;
+    case BorderHugReject::SegmentTFit:
+        ++segmentTFit;
+        break;
+    default:
+        break;
+    }
+}
+
+BorderHugReject BorderHugRejectStats::primary() const {
+    int             bestCount = 0;
+    BorderHugReject best      = BorderHugReject::None;
+    auto            consider  = [&](int count, BorderHugReject reason) {
+        if (count > bestCount) {
+            bestCount = count;
+            best      = reason;
+        }
+    };
+    consider(roadCross, BorderHugReject::RoadCross);
+    consider(overlap, BorderHugReject::Overlap);
+    consider(borderMaxDist, BorderHugReject::BorderMaxDist);
+    consider(segmentTFit, BorderHugReject::SegmentTFit);
+    consider(frontageTooWide, BorderHugReject::FrontageTooWide);
+    consider(tooSmall, BorderHugReject::TooSmall);
+    return best;
+}
+
+const char* borderHugRejectName(BorderHugReject reason) {
+    switch (reason) {
+    case BorderHugReject::TooSmall:
+        return "too_small";
+    case BorderHugReject::BorderMaxDist:
+        return "border_max_dist";
+    case BorderHugReject::RoadCross:
+        return "road_cross";
+    case BorderHugReject::Overlap:
+        return "overlap";
+    case BorderHugReject::FrontageTooWide:
+        return "frontage_too_wide";
+    case BorderHugReject::SegmentTFit:
+        return "segment_t_fit";
+    default:
+        return "none";
+    }
+}
+
+std::string formatBorderHugRejectStats(const BorderHugRejectStats& stats) {
+    const BorderHugReject primary = stats.primary();
+    if (primary == BorderHugReject::None) {
+        return "no_candidate";
+    }
+    std::ostringstream oss;
+    oss << borderHugRejectName(primary);
+    const int primaryCount = [&]() {
+        switch (primary) {
+        case BorderHugReject::TooSmall:
+            return stats.tooSmall;
+        case BorderHugReject::BorderMaxDist:
+            return stats.borderMaxDist;
+        case BorderHugReject::RoadCross:
+            return stats.roadCross;
+        case BorderHugReject::Overlap:
+            return stats.overlap;
+        case BorderHugReject::FrontageTooWide:
+            return stats.frontageTooWide;
+        case BorderHugReject::SegmentTFit:
+            return stats.segmentTFit;
+        default:
+            return 0;
+        }
+    }();
+    oss << '(' << primaryCount << ')';
+    return oss.str();
+}
+
+namespace {
+
+constexpr float kBorderDistEps = 1e-3f;
+
+enum class BorderFootprintReject { None, Overlap, RoadCross };
+
+BorderFootprintReject borderFootprintRejectReason(const BuildingFootprint& footprint,
+                                                  const Town& town, int hostRoadId) {
+    if (footprintOverlapsInstances(footprint, town.buildingInstances)) {
+        return BorderFootprintReject::Overlap;
+    }
+    if (polygonEdgesCrossRoads(footprint.corners, town, hostRoadId)) {
+        return BorderFootprintReject::RoadCross;
+    }
+    return BorderFootprintReject::None;
+}
+
+void borderSlotAxes(const BorderSlotRef& slot, Vec2& axisU, Vec2& axisV) {
+    axisU = slot.outlineTangent.length() > 1e-4f ? slot.outlineTangent.normalized()
+                                               : Vec2{1.f, 0.f};
+    axisV = perpendicular(axisU);
+    if (slot.outlineInward.length() > 1e-4f && axisV.dot(slot.outlineInward) < 0.f) {
+        axisV = axisV * -1.f;
+        axisU = axisU * -1.f;
+    }
+}
+
+bool borderFootprintPlacementValid(const BuildingFootprint& footprint, const Town& town,
+                                   int hostRoadId) {
+    if (!footprintHasRightAngles(footprint)) {
+        return false;
+    }
+    if (footprintOverlapsInstances(footprint, town.buildingInstances)) {
+        return false;
+    }
+    return !polygonEdgesCrossRoads(footprint.corners, town, hostRoadId);
+}
+
+bool footprintFitsRoadSegmentT(const BuildingFootprint& footprint, const Vec2& origin,
+                               const Vec2& edgeDir, float segStartT, float segEndT) {
+    float minT = 1e30f;
+    float maxT = -1e30f;
+    for (const Vec2& corner : footprint.corners) {
+        const float t = (corner - origin).dot(edgeDir);
+        minT          = std::min(minT, t);
+        maxT          = std::max(maxT, t);
+    }
+    return minT >= segStartT - kBorderDistEps && maxT <= segEndT + kBorderDistEps;
+}
+
+}  // namespace
+
+bool tryMainBorderBandOnPlot(const Plot& plot, const ResolvedBuildingSpec& spec, int buildingId,
+                             int townSeed, BuildingFootprint& out) {
+    const float         aspect = sampleAspectRatio(townSeed, buildingId, 0);
+    const BuildingSides sides  = sidesFromArea(spec.area, aspect);
+    const Vec2          backMid = (plot.corners[2] + plot.corners[3]) * 0.5f;
+    const Vec2          frontMid = (plot.corners[0] + plot.corners[1]) * 0.5f;
+    Vec2                towardBack = backMid - frontMid;
+    if (towardBack.length() < 1e-4f) {
+        towardBack = plotBankInward(plot);
+    } else {
+        towardBack = towardBack.normalized();
+    }
+
+    Vec2 axisU{};
+    Vec2 axisV{};
+    plotOrthogonalAxes(plot, 0.f, axisU, axisV);
+    ensureAxisVAlong(towardBack, axisU, axisV);
+
+    const float scaleSteps[] = {1.f, 0.92f, 0.84f, 0.76f, 0.68f, 0.6f};
+    float       bestScore    = 1e30f;
+    BuildingFootprint best;
+    bool found = false;
+
+    for (const float scale : scaleSteps) {
+        const float frontage = sides.longSide * scale;
+        const float depth    = sides.shortSide * scale;
+        if (frontage < 2.f || depth < 2.f) {
+            continue;
+        }
+        const Vec2 anchor = backMid - axisV * depth * 0.5f;
+        BuildingFootprint candidate;
+        makeOrthogonalRectCentered(anchor, axisU, frontage, depth, candidate);
+        if (!footprintInsidePlot(candidate, plot)) {
+            continue;
+        }
+        const Vec2 fpCenter = footprintCenter(candidate);
+        const float score   = (plotCenterFromCorners(plot) - fpCenter).length();
+        if (score < bestScore) {
+            bestScore           = score;
+            best                = candidate;
+            best.placedShortLen = depth;
+            best.placedLongLen  = frontage;
+            found               = true;
+        }
+    }
+
+    if (!found) {
+        return false;
+    }
+
+    out                = best;
+    out.sizeCategory   = spec.sizeCategory;
+    out.mainBuilding   = true;
+    copyTemplateRulesToFootprint(spec.rules, out);
+    return true;
+}
+
+bool tryMainBorderHugFromPlot(const Plot& plot, const BorderSlotRef& slot,
+                              const ResolvedBuildingSpec& spec, int buildingId, int townSeed,
+                              const BuildingTerrainRules& rules, const TerrainAtlas& terrain,
+                              const Town& town, BuildingFootprint& out,
+                              BorderHugRejectStats* rejectStats) {
+    const float         aspect = sampleAspectRatio(townSeed, buildingId, 0);
+    const BuildingSides sides  = sidesFromArea(spec.area, aspect);
+
+    const Vec2 plotBackMid = (plot.corners[2] + plot.corners[3]) * 0.5f;
+    const Vec2 frontMid    = (plot.corners[0] + plot.corners[1]) * 0.5f;
+    Vec2       towardFeature = plotBackMid - frontMid;
+    if (towardFeature.length() < 1e-4f) {
+        if (slot.outlineInward.length() > 1e-4f) {
+            towardFeature = slot.outlineInward.normalized() * -1.f;
+        } else {
+            towardFeature = plotBankInward(plot);
+        }
+    } else {
+        towardFeature = towardFeature.normalized();
+    }
+
+    constexpr float kQuarterTurnRad = 1.57079632679f;
+    const float     rotations[]     = {0.f, kQuarterTurnRad};
+    const float maxSlide   = slot.hitDist + plot.depth + 4.f;
+    const float scaleSteps[] = {1.f, 0.92f, 0.84f, 0.76f, 0.68f, 0.6f};
+
+    for (const float rotation : rotations) {
+        Vec2 axisU{};
+        Vec2 axisV{};
+        plotOrthogonalAxes(plot, rotation, axisU, axisV);
+        ensureAxisVAlong(towardFeature, axisU, axisV);
+
+        for (const float scale : scaleSteps) {
+            const float frontage = sides.longSide * scale;
+            const float depth    = sides.shortSide * scale;
+            if (frontage < 2.f || depth < 2.f) {
+                if (rejectStats != nullptr) {
+                    rejectStats->record(BorderHugReject::TooSmall);
+                }
+                continue;
+            }
+
+            for (float slide = 0.f; slide <= maxSlide + kBorderDistEps; slide += 0.75f) {
+                const Vec2 backEdgeMid = plotBackMid - towardFeature * slide;
+                const Vec2 anchor      = backEdgeMid - axisV * depth * 0.5f;
+                BuildingFootprint candidate;
+                makeOrthogonalRectCentered(anchor, axisU, frontage, depth, candidate);
+
+                const Vec2 backCornerA = candidate.corners[2];
+                const Vec2 backCornerB = candidate.corners[3];
+                const float edgeA =
+                    distToPreferEdge(backCornerA, slot.terrainId, terrain);
+                const float edgeB =
+                    distToPreferEdge(backCornerB, slot.terrainId, terrain);
+                if (edgeA > rules.borderMaxDist + 1.f || edgeB > rules.borderMaxDist + 1.f) {
+                    if (rejectStats != nullptr) {
+                        rejectStats->record(BorderHugReject::BorderMaxDist);
+                    }
+                    continue;
+                }
+
+                switch (borderFootprintRejectReason(candidate, town, plot.roadId)) {
+                case BorderFootprintReject::Overlap:
+                    if (rejectStats != nullptr) {
+                        rejectStats->record(BorderHugReject::Overlap);
+                    }
+                    continue;
+                case BorderFootprintReject::RoadCross:
+                    if (rejectStats != nullptr) {
+                        rejectStats->record(BorderHugReject::RoadCross);
+                    }
+                    continue;
+                default:
+                    break;
+                }
+
+                out                = candidate;
+                out.placedShortLen = depth;
+                out.placedLongLen  = frontage;
+                out.sizeCategory   = spec.sizeCategory;
+                out.mainBuilding   = true;
+                copyTemplateRulesToFootprint(spec.rules, out);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool tryMainBorderHugFromSlot(const BorderSlotRef& slot, float /*roadT*/, const Vec2& /*roadStart*/,
+                              const Vec2& /*edgeDir*/, const Vec2& /*bankInward*/,
+                              const ResolvedBuildingSpec& spec, int buildingId, int townSeed,
+                              const BuildingTerrainRules& /*rules*/, const TerrainAtlas& /*terrain*/,
+                              const Town& town, BuildingFootprint& out,
+                              BorderHugRejectStats* rejectStats) {
+    const float         aspect = sampleAspectRatio(townSeed, buildingId, 0);
+    const BuildingSides sides  = sidesFromArea(spec.area, aspect);
+    Vec2                axisU{};
+    Vec2                axisV{};
+    borderSlotAxes(slot, axisU, axisV);
+
+    const float scaleSteps[] = {1.f, 0.92f, 0.84f, 0.76f, 0.68f, 0.6f};
+
+    const Road& road = town.roads[static_cast<std::size_t>(slot.base.roadId)];
+    Vec2        frameOrigin{};
+    Vec2        farEnd{};
+    Vec2        frameEdgeDir{};
+    if (!roadFrameForBank(road, slot.base.bankIndex, frameOrigin, farEnd, frameEdgeDir)) {
+        return false;
+    }
+
+    for (const float scale : scaleSteps) {
+        const float frontage = sides.longSide * scale;
+        const float depth    = sides.shortSide * scale;
+        if (frontage < 2.f || depth < 2.f) {
+            if (rejectStats != nullptr) {
+                rejectStats->record(BorderHugReject::TooSmall);
+            }
+            continue;
+        }
+        if (frontage > (slot.base.endT - slot.base.startT) + kBorderDistEps) {
+            if (rejectStats != nullptr) {
+                rejectStats->record(BorderHugReject::FrontageTooWide);
+            }
+            continue;
+        }
+
+        const Vec2 backMid = slot.outlinePoint;
+        const Vec2 anchor  = backMid - axisV * depth * 0.5f;
+        BuildingFootprint candidate;
+        makeOrthogonalRectCentered(anchor, axisU, frontage, depth, candidate);
+
+        if (!footprintFitsRoadSegmentT(candidate, frameOrigin, frameEdgeDir, slot.base.startT,
+                                       slot.base.endT)) {
+            if (rejectStats != nullptr) {
+                rejectStats->record(BorderHugReject::SegmentTFit);
+            }
+            continue;
+        }
+        switch (borderFootprintRejectReason(candidate, town, slot.base.roadId)) {
+        case BorderFootprintReject::Overlap:
+            if (rejectStats != nullptr) {
+                rejectStats->record(BorderHugReject::Overlap);
+            }
+            continue;
+        case BorderFootprintReject::RoadCross:
+            if (rejectStats != nullptr) {
+                rejectStats->record(BorderHugReject::RoadCross);
+            }
+            continue;
+        default:
+            break;
+        }
+
+        out                = candidate;
+        out.placedShortLen = depth;
+        out.placedLongLen  = frontage;
+        out.sizeCategory   = spec.sizeCategory;
+        out.mainBuilding   = true;
+        copyTemplateRulesToFootprint(spec.rules, out);
+        return true;
+    }
+
+    return false;
+}
+
+void assignDoorEdgeTowardHint(BuildingFootprint& footprint, const Vec2& faceHint,
+                              const BuildingTemplateRules& rules, int buildingId) {
+    const Vec2 buildingCenter = footprintCenter(footprint);
+    Vec2       hint           = faceHint;
+    if (hint.length() < 1e-4f) {
+        hint = {0.f, 1.f};
+    } else {
+        hint = hint.normalized();
+    }
+
+    float edgeLens[4];
+    float maxLen = 0.f;
+    float minLen = 1e9f;
+    for (int i = 0; i < 4; ++i) {
+        edgeLens[i] = (footprint.corners[(i + 1) % 4] - footprint.corners[i]).length();
+        maxLen      = std::max(maxLen, edgeLens[i]);
+        minLen      = std::min(minLen, edgeLens[i]);
+    }
+
+    int   bestEdge  = -1;
+    float bestScore = -1e9f;
+    for (int i = 0; i < 4; ++i) {
+        if (edgeLens[i] < 1e-4f) {
+            continue;
+        }
+        if (rules.doorLong
+            && !edgeIsLongSide(edgeLens[i], footprint.placedLongLen, footprint.placedShortLen,
+                               maxLen)) {
+            continue;
+        }
+        if (rules.doorShort
+            && !edgeIsShortSide(edgeLens[i], footprint.placedLongLen, footprint.placedShortLen,
+                                minLen)) {
+            continue;
+        }
+        const Vec2  normal = outwardNormalForEdge(footprint, i, buildingCenter);
+        const float score  = normal.dot(hint);
+        if (score > bestScore) {
+            bestScore = score;
+            bestEdge  = i;
+        }
+    }
+    if (bestEdge < 0) {
+        bestEdge = 0;
+    }
+    footprint.doorEdge = bestEdge;
+
+    Logger::log("layout",
+                "door: plot=" + std::to_string(buildingId) + " building="
+                    + std::to_string(footprint.labelId) + " size=" + footprint.sizeCategory
+                    + " door_hint=1 edge=" + std::to_string(bestEdge));
+}
+
+bool layoutSecondaryBuildingsOnPlot(const Plot& plot, const Town& town,
+                                    const std::vector<ResolvedBuildingSpec>& specs, int buildingId,
+                                    int townSeed, std::vector<BuildingFootprint>& ioFootprints) {
+    int salt    = 1;
+    int labelId = static_cast<int>(ioFootprints.size());
+    for (const ResolvedBuildingSpec& spec : specs) {
+        if (spec.isMain) {
+            continue;
+        }
+        const float         aspect = sampleAspectRatio(townSeed, buildingId, salt);
+        const BuildingSides sides  = sidesFromArea(spec.area, aspect);
+        BuildingFootprint   footprint;
+        footprint.sizeCategory = spec.sizeCategory;
+        footprint.mainBuilding = false;
+        copyTemplateRulesToFootprint(spec.rules, footprint);
+
+        if (!placeFootprintFromTemplate(plot, sides, spec.rules, ioFootprints, buildingId, townSeed,
+                                        salt++, false, footprint)) {
+            Logger::log("layout", "layout_skip: building index=" + std::to_string(labelId)
+                                     + " size=" + spec.sizeCategory + " reason=no_room_in_plot");
+            continue;
+        }
+
+        footprint.labelId = labelId++;
+        assignDoorEdge(footprint, plot, town, spec.rules, buildingId);
+        ioFootprints.push_back(footprint);
+    }
+    return true;
+}
+
+void assignBuildingDoorEdge(BuildingFootprint& footprint, const Plot& plot, const Town& town,
+                            const BuildingTemplateRules& rules, int buildingId) {
+    assignDoorEdge(footprint, plot, town, rules, buildingId);
 }

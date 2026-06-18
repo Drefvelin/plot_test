@@ -8,10 +8,11 @@
 
 struct TerrainColorEntry {
     std::array<uint8_t, 3> rgb{};
-    TerrainKind            kind = TerrainKind::Unknown;
+    TerrainId              id = kTerrainUnknown;
 };
 
-std::vector<TerrainColorEntry> loadTerrainColorMap(const std::filesystem::path& path);
+std::vector<TerrainColorEntry> loadTerrainColorMap(const std::filesystem::path& path,
+                                                   const TerrainCatalog& catalog);
 
-TerrainKind classifyTerrainColor(uint8_t r, uint8_t g, uint8_t b,
-                                 const std::vector<TerrainColorEntry>& colorMap);
+TerrainId classifyTerrainColor(uint8_t r, uint8_t g, uint8_t b,
+                               const std::vector<TerrainColorEntry>& colorMap);

@@ -19,6 +19,7 @@ enum class ProfileScopeId : std::uint8_t {
     SyncAlleyCleanup,
     PlacementPrep,
     RingBump,
+    MovableRelocate,
     // PlaceGapFill / PlacePlot breakdown
     GapFillCollect,
     GapFillTrySlot,
@@ -32,6 +33,13 @@ enum class ProfileScopeId : std::uint8_t {
     MeshRoad,
     MeshHopDebug,
     MeshJunction,
+    TerrainBorderPlace,
+    BorderCandidateLayout,
+    TerrainScanPeek,
+    TerrainScanTrySlot,
+    RebuildPlacementFrontier,
+    RebuildTerrainScanFrontier,
+    RebuildBorderFrontier,
     Count,
 };
 

@@ -1,64 +1,45 @@
 # Terrain Data Model
 
-Proposed runtime structure after baking. Names are suggestions; adjust to match code when implemented.
+Runtime structure after baking. See [`TerrainAtlas.h`](../app/core/TerrainAtlas.h) and [`TerrainBake.cpp`](../app/core/TerrainBake.cpp).
 
 ## TerrainAtlas
 
 Top-level object loaded once and passed into town build and placement.
 
 ```cpp
-enum class TerrainKind {
-    Unknown,
-    Sea,
-    River,
-    Plains,
-    Forest,
-    Hills,
-    Mountain,
-    Forbidden,  // sea | river (with optional buffer)
-};
-
-struct TerrainRegion {
-    TerrainKind kind;
-    std::vector<Vec2> polygon;  // simplified, closed
-};
-
-struct RiverFeature {
-    std::vector<Vec2> centerline;  // open polyline, simplified
-    float avgWidth = 0.f;          // estimated at bake time (world units)
-};
-
 struct TerrainAtlas {
-    std::vector<TerrainRegion> forbidden;   // water: sea + river (+ buffer)
-    std::vector<TerrainRegion> forests;
-    std::vector<TerrainRegion> hills;
-    std::vector<TerrainRegion> mountains;
-    std::vector<RiverFeature>  rivers;
-    std::vector<Vec2>          shoreline;   // polyline(s): sea ↔ land boundary
+    TerrainKind majorityLandKind;  // dominant non-water kind for this map (often plains)
 
-    // Optional fast sampling (e.g. 128×128 over diagram extent)
-    int   gridW = 0;
-    int   gridH = 0;
-    Vec2  gridOrigin{};
-    float gridCellSize = 0.f;
-    std::vector<TerrainKind> grid;  // row-major, dominant kind per cell
+    std::vector<std::vector<Vec2>> forbiddenPolygons;  // dilated sea+river
+    std::vector<std::vector<Vec2>> riverOutlines;
+    std::vector<std::vector<Vec2>> seaOutlines;
+    std::vector<std::vector<Vec2>> forestOutlines;   // empty when forest is majority
+    std::vector<std::vector<Vec2>> hillsOutlines;    // hills+mountain mask; empty when majority
+    std::vector<std::vector<Vec2>> plainsOutlines;   // empty when plains is majority
+
+    std::vector<TerrainKind> raster;       // full-res labelled image
+    std::vector<uint8_t>     forbiddenDilated;
+    // ... corridor road graphs, overlay texture, debug meshes
 };
 ```
 
-## Query API (proposed)
+Land biome outlines use the same **interface polyline + simplify** pipeline as rivers/shore. Only **minority** land kinds (≠ `majorityLandKind`) are traced; the majority kind is the implicit background and has no outline.
 
-These should be cheap at placement time:
+## Query API
 
-| Function | Purpose |
-|----------|---------|
-| `TerrainKind sample(Vec2 p)` | Coarse grid lookup or cascade point-in-polygon |
-| `bool isBuildable(Vec2 p, float margin)` | Not inside forbidden; optional margin from river centerline |
-| `float distToRiver(Vec2 p)` | Min distance to any river centerline segment |
-| `float distToShore(Vec2 p)` | Min distance to shoreline polyline |
-| `float distToRegionEdge(Vec2 p, TerrainKind kind)` | Distance to nearest edge of matching region polygons |
-| `float terrainAffinity(buildingType, Vec2 p)` | Lower = better match for building def |
+| Function | Status | Purpose |
+|----------|--------|---------|
+| `TerrainKind sample(Vec2 p)` | **Done** | Full-res raster lookup |
+| `bool isBuildable(Vec2 p)` | **Done** | Not in dilated forbidden mask |
+| `bool hasRegionOutline(TerrainKind kind)` | **Done** | False when kind is majority (empty outlines) |
+| `float distToRegionEdge(Vec2 p, TerrainKind kind)` | **Done** | Min distance to smoothed outline segments; large sentinel if no outline |
+| `float distToRiver(Vec2 p)` | Planned | Min distance to river centerline (not outline) |
+| `float distToShore(Vec2 p)` | Planned | Min distance to `seaOutlines` |
+| `float terrainAffinity(buildingType, Vec2 p)` | Planned | Lower = better match for building def |
 
-Distance queries can use segment distance against simplified polylines/polygons. For “near forest”, cap search radius (e.g. 20 units) so work stays bounded.
+Inside a biome: use `sample(p) == kind`. Outlines are for **edge distance**, not polygon inside/outside tests.
+
+Distance queries walk simplified polylines via `distancePointToSegment`. Cap search radius at placement time when scoring (e.g. 20 units near forest).
 
 ## Extensions on existing types
 
@@ -77,12 +58,13 @@ Compute by sampling the terrain grid near the frontage segment midpoint or over 
 
 Authoritative placement semantics: [`placement-model.md`](placement-model.md).
 
-Per-type fields include `type` (`urban` | `residential` | `rural`) and optional `fill_in`:
+Per-type fields include `type` (`urban` | `residential` | `rural` | `any`) and optional `fill_in`:
 
 | `type` | Hop band | Plots | `fill_in: true` |
 |--------|----------|-------|-----------------|
 | `residential` / `urban` | Town ring (`hop <= suburbanMaxHop`) | **Always** | Extra **core-only** gap-fill when densifying |
 | `rural` | Outside town ring (`hop > suburbanMaxHop`) | **Always** | Ignored |
+| `any` | All roads (no hop gate) | **Always** | Ignored |
 
 Example:
 

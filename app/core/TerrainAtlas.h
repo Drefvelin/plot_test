@@ -7,6 +7,7 @@
 #include <SFML/Graphics.hpp>
 
 #include <filesystem>
+#include <unordered_map>
 #include <vector>
 
 enum class TerrainOverlayMode {
@@ -18,22 +19,21 @@ enum class TerrainOverlayMode {
 
 struct TerrainAtlas {
     bool valid = false;
+    const TerrainCatalog* catalog = nullptr;
 
     int   sourceW   = 0;
     int   sourceH   = 0;
     float diagramW  = 0.f;
     float diagramH  = 0.f;
-    std::vector<TerrainKind> raster;
+    std::vector<TerrainId>   raster;
     std::vector<uint8_t>     forbiddenDilated;
 
     float waterInset = 0.f;
     float shoreInset = 0.f;
 
     std::vector<std::vector<Vec2>> forbiddenPolygons;
-    std::vector<std::vector<Vec2>> riverOutlines;
-    std::vector<std::vector<Vec2>> seaOutlines;
-    std::vector<std::vector<Vec2>> forestPolygons;
-    std::vector<std::vector<Vec2>> hillsPolygons;
+    std::unordered_map<TerrainId, std::vector<std::vector<Vec2>>> outlinesByTerrainId;
+    TerrainId                      majorityLandId = kTerrainUnknown;
     std::vector<std::vector<Vec2>> shoreRoadGraph;
     std::vector<std::vector<Vec2>> riverRoadGraph;
 
@@ -47,10 +47,15 @@ struct TerrainAtlas {
 
     bool isForbidden(Vec2 worldPos) const;
     bool isBuildable(Vec2 worldPos) const;
-    TerrainKind sample(Vec2 worldPos) const;
+    TerrainId sample(Vec2 worldPos) const;
+    const std::vector<std::vector<Vec2>>* outlineGraphs(TerrainId id) const;
+    bool hasOutline(TerrainId id) const;
+    bool hasRegionOutline(TerrainId id) const;
+    float distToRegionEdge(Vec2 worldPos, TerrainId id) const;
 };
 
-TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& projectRoot);
+TerrainAtlas bakeTerrain(const Config& config, const TerrainCatalog& catalog,
+                         const std::filesystem::path& projectRoot);
 
 void buildTerrainDebugMeshes(TerrainAtlas& atlas, float pixelsPerUnit, float contourWidthWorld);
 

@@ -112,6 +112,17 @@ TownConfig TownConfig::load(const std::filesystem::path& path) {
     if (root["alley_fill_fail_limit"]) {
         config.alleyFillFailLimit = std::max(1, root["alley_fill_fail_limit"].as<int>());
     }
+    if (root["border_outline_probe_max_dist"]) {
+        config.borderOutlineProbeMaxDist =
+            std::max(0.f, root["border_outline_probe_max_dist"].as<float>());
+    }
+    if (root["border_outline_sample_step"]) {
+        config.borderOutlineSampleStep =
+            std::max(0.5f, root["border_outline_sample_step"].as<float>());
+    }
+    if (root["border_max_attempts"]) {
+        config.borderMaxAttempts = std::max(1, root["border_max_attempts"].as<int>());
+    }
 
     return config;
 }

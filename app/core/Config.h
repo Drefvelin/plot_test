@@ -28,6 +28,7 @@ struct PlotConfig {
     float maxArea              = 200.f;
     float maxDepthToFrontRatio = 1.5f;  // neither side may exceed ratio * the other
     float frontageSetback      = 2.f;   // front row inset from road, into cell
+    int   terrainAnchorMaxRoads = 4;    // BFS road cap for terrain_anchor fallback
 };
 
 struct VoronoiConfig {
@@ -67,10 +68,12 @@ struct DebugConfig {
 struct TerrainConfig {
     std::string imagePath           = "assets/terrain.png";
     std::string colorsPath          = "app/config/terrain.txt";
+    std::string terrainsPath        = "app/config/terrains.yml";
     int         gridSize            = 128;
     float       simplifyTolerance   = 2.f;
     float       waterInset          = 2.f;
     float       shoreInset          = 2.f;
+    float       riverInset          = 2.f;
     float       contourWidth        = 1.f;
     bool        clipRoadsAtWater    = true;
     bool        corridorRoadsEnabled = false;

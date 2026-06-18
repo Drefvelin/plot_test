@@ -821,8 +821,8 @@ struct GapCandidate {
 std::vector<GapCandidate> collectOrderedRoadGaps(Town& town, float minGapWidth, int forceRoadId,
                                                  float maxDistInclusive) {
     std::vector<GapCandidate> candidates;
-    candidates.reserve(town.frontiers.alley.size());
-    for (const AlleyFrontierRef& ref : town.frontiers.alley) {
+    candidates.reserve(town.frontierManager.alley.size());
+    for (const AlleyFrontierRef& ref : town.frontierManager.alley) {
         if (ref.centerDist > maxDistInclusive + 1e-3f) {
             continue;
         }

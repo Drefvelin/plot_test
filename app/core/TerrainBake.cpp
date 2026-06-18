@@ -1,6 +1,7 @@
 #include "TerrainAtlas.h"
 
 #include "Logger.h"
+#include "PlotGeometry.h"
 #include "Profile.h"
 #include "TerrainColors.h"
 #include "Units.h"
@@ -20,6 +21,59 @@
 namespace {
 
 int gridIndex(int x, int y, int w) { return y * w + x; }
+
+constexpr float kNoRegionOutlineDist = 1e30f;
+
+TerrainId computeMajorityLandId(TerrainId plainsId, TerrainId forestId, TerrainId hillsId,
+                                TerrainId mountainId, int countPlains, int countForest,
+                                int countHills, int countMountain) {
+    struct Entry {
+        TerrainId kind;
+        int         count;
+        int         tieRank;
+    };
+    Entry entries[] = {
+        {plainsId, countPlains, 0},
+        {forestId, countForest, 1},
+        {hillsId, countHills, 2},
+        {mountainId, countMountain, 3},
+    };
+    Entry* best = &entries[0];
+    for (int i = 1; i < 4; ++i) {
+        if (entries[i].count > best->count
+            || (entries[i].count == best->count && entries[i].tieRank < best->tieRank)) {
+            best = &entries[i];
+        }
+    }
+    if (best->count <= 0) {
+        return plainsId;
+    }
+    return best->kind;
+}
+
+const std::vector<std::vector<Vec2>>* regionOutlineGraphs(const TerrainAtlas& atlas,
+                                                          TerrainId kind) {
+    return atlas.outlineGraphs(kind);
+}
+
+float distToOutlineGraphs(const Vec2& p, const std::vector<std::vector<Vec2>>& graphs) {
+    float best = kNoRegionOutlineDist;
+    for (const std::vector<Vec2>& graph : graphs) {
+        if (graph.size() < 2) {
+            continue;
+        }
+        for (std::size_t i = 1; i < graph.size(); ++i) {
+            const float dist = distancePointToSegment(p, graph[i - 1], graph[i]);
+            if (dist < best) {
+                best = dist;
+                if (best <= 0.f) {
+                    return 0.f;
+                }
+            }
+        }
+    }
+    return best;
+}
 
 struct IPoint {
     int x = 0;
@@ -93,8 +147,8 @@ std::function<bool(int, int)> maskPredicate(const std::vector<uint8_t>& mask, in
     };
 }
 
-bool sampleRasterForbidden(const std::vector<TerrainKind>& raster, int w, int h, float diagramW,
-                           float diagramH, Vec2 worldPos) {
+bool sampleRasterForbidden(const std::vector<TerrainId>& raster, int w, int h, float diagramW,
+                           float diagramH, Vec2 worldPos, const TerrainCatalog& catalog) {
     if (worldPos.x < 0.f || worldPos.y < 0.f || worldPos.x > diagramW || worldPos.y > diagramH) {
         return false;
     }
@@ -102,20 +156,21 @@ bool sampleRasterForbidden(const std::vector<TerrainKind>& raster, int w, int h,
                               w - 1);
     const int py = std::clamp(static_cast<int>(worldPos.y / diagramH * static_cast<float>(h)), 0,
                               h - 1);
-    return terrainKindIsForbidden(raster[static_cast<std::size_t>(gridIndex(px, py, w))]);
+    return terrainIdIsForbidden(raster[static_cast<std::size_t>(gridIndex(px, py, w))], catalog);
 }
 
-bool segmentCrossesForbidden(const Vec2& a, const Vec2& b, const std::vector<TerrainKind>& raster,
-                             int w, int h, float diagramW, float diagramH) {
+bool segmentCrossesForbidden(const Vec2& a, const Vec2& b, const std::vector<TerrainId>& raster,
+                             int w, int h, float diagramW, float diagramH,
+                             const TerrainCatalog& catalog) {
     const Vec2  delta = b - a;
     const float len   = delta.length();
     if (len < 1e-4f) {
-        return sampleRasterForbidden(raster, w, h, diagramW, diagramH, a);
+        return sampleRasterForbidden(raster, w, h, diagramW, diagramH, a, catalog);
     }
     constexpr float kStep = 0.25f;
     for (float dist = 0.f; dist <= len + 1e-3f; dist += kStep) {
         const float t = std::min(dist / len, 1.f);
-        if (sampleRasterForbidden(raster, w, h, diagramW, diagramH, a + delta * t)) {
+        if (sampleRasterForbidden(raster, w, h, diagramW, diagramH, a + delta * t, catalog)) {
             return true;
         }
     }
@@ -189,8 +244,9 @@ std::vector<Vec2> resamplePolylineByDistance(const std::vector<Vec2>& points, fl
 }
 
 std::vector<Vec2> subdivideContourUntilClear(std::vector<Vec2> poly, bool closed,
-                                             const std::vector<TerrainKind>& raster, int w, int h,
-                                             float diagramW, float diagramH) {
+                                             const std::vector<TerrainId>& raster, int w, int h,
+                                             float diagramW, float diagramH,
+                                             const TerrainCatalog& catalog) {
     if (poly.size() < 2) {
         return poly;
     }
@@ -204,7 +260,8 @@ std::vector<Vec2> subdivideContourUntilClear(std::vector<Vec2> poly, bool closed
         bool subdivided = false;
         for (std::size_t i = 0; i < edgeCount(); ++i) {
             const std::size_t j = closed ? (i + 1) % poly.size() : i + 1;
-            if (!segmentCrossesForbidden(poly[i], poly[j], raster, w, h, diagramW, diagramH)) {
+            if (!segmentCrossesForbidden(poly[i], poly[j], raster, w, h, diagramW, diagramH,
+                                         catalog)) {
                 continue;
             }
             poly.insert(poly.begin() + static_cast<std::ptrdiff_t>(j),
@@ -226,8 +283,8 @@ void removeDirectedEdge(std::map<IPoint, std::vector<IPoint>>& adjacency, const 
 
 std::vector<std::vector<Vec2>> buildContourGraphs(
     const std::vector<std::vector<Vec2>>& boundaryPolylines, float edgeSpacing, bool closed,
-    bool waterSafe, const std::vector<TerrainKind>& raster, int w, int h, float diagramW,
-    float diagramH) {
+    bool waterSafe, const std::vector<TerrainId>& raster, int w, int h, float diagramW,
+    float diagramH, const TerrainCatalog& catalog) {
     std::vector<std::vector<Vec2>> graphs;
     graphs.reserve(boundaryPolylines.size());
     for (const std::vector<Vec2>& polyline : boundaryPolylines) {
@@ -237,7 +294,7 @@ std::vector<std::vector<Vec2>> buildContourGraphs(
         std::vector<Vec2> graph = resamplePolylineByDistance(polyline, edgeSpacing, closed);
         if (waterSafe) {
             graph = subdivideContourUntilClear(std::move(graph), closed, raster, w, h, diagramW,
-                                                diagramH);
+                                                diagramH, catalog);
         }
         if (graph.size() >= 2) {
             graphs.push_back(std::move(graph));
@@ -345,13 +402,15 @@ std::vector<std::vector<Vec2>> extractInterfacePolylines(const std::function<boo
 
 std::vector<std::vector<Vec2>> buildWaterContourGraph(
     const std::function<bool(int, int)>& insideMask, int w, int h, float diagramW, float diagramH,
-    float insetWorld, float edgeSpacing, const std::vector<TerrainKind>& raster) {
+    float insetWorld, float edgeSpacing, const std::vector<TerrainId>& raster,
+    const TerrainCatalog& catalog) {
     const int insetPx = worldUnitsToPixelRadius(insetWorld, diagramW, w);
     const std::vector<uint8_t> rawMask = buildMask(insideMask, w, h);
     const std::vector<uint8_t> dilated = dilateMask(rawMask, w, h, insetPx);
     const auto                 trace   = maskPredicate(dilated, w, h);
     const auto loops = extractInterfacePolylines(trace, w, h, diagramW, diagramH);
-    return buildContourGraphs(loops, edgeSpacing, false, true, raster, w, h, diagramW, diagramH);
+    return buildContourGraphs(loops, edgeSpacing, false, true, raster, w, h, diagramW, diagramH,
+                              catalog);
 }
 
 std::vector<Vec2> simplifyPolylineMinEdgeLength(const std::vector<Vec2>& polyline, float minLen) {
@@ -632,25 +691,57 @@ bool TerrainAtlas::isForbidden(Vec2 worldPos) const {
             static_cast<int>(worldPos.y / diagramH * static_cast<float>(sourceH)), 0, sourceH - 1);
         return forbiddenDilated[static_cast<std::size_t>(py * sourceW + px)] != 0;
     }
-    return terrainKindIsForbidden(sample(worldPos));
+    return catalog != nullptr && terrainIdIsForbidden(sample(worldPos), *catalog);
 }
 
 bool TerrainAtlas::isBuildable(Vec2 worldPos) const {
     return !isForbidden(worldPos);
 }
 
-TerrainKind TerrainAtlas::sample(Vec2 worldPos) const {
+TerrainId TerrainAtlas::sample(Vec2 worldPos) const {
     if (sourceW <= 0 || sourceH <= 0 || raster.empty()) {
-        return TerrainKind::Unknown;
+        return kTerrainUnknown;
     }
     if (worldPos.x < 0.f || worldPos.y < 0.f || worldPos.x > diagramW || worldPos.y > diagramH) {
-        return TerrainKind::Unknown;
+        return kTerrainUnknown;
     }
     const int px = std::clamp(static_cast<int>(worldPos.x / diagramW * static_cast<float>(sourceW)),
                               0, sourceW - 1);
     const int py = std::clamp(static_cast<int>(worldPos.y / diagramH * static_cast<float>(sourceH)),
                               0, sourceH - 1);
     return raster[static_cast<std::size_t>(gridIndex(px, py, sourceW))];
+}
+
+const std::vector<std::vector<Vec2>>* TerrainAtlas::outlineGraphs(TerrainId id) const {
+    const auto it = outlinesByTerrainId.find(id);
+    if (it == outlinesByTerrainId.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+bool TerrainAtlas::hasOutline(TerrainId id) const {
+    const auto* graphs = outlineGraphs(id);
+    return graphs != nullptr && !graphs->empty();
+}
+
+bool TerrainAtlas::hasRegionOutline(TerrainId kind) const {
+    if (!valid || kind == majorityLandId) {
+        return false;
+    }
+    const std::vector<std::vector<Vec2>>* graphs = regionOutlineGraphs(*this, kind);
+    return graphs != nullptr && !graphs->empty();
+}
+
+float TerrainAtlas::distToRegionEdge(Vec2 worldPos, TerrainId kind) const {
+    if (!hasRegionOutline(kind)) {
+        return kNoRegionOutlineDist;
+    }
+    const std::vector<std::vector<Vec2>>* graphs = regionOutlineGraphs(*this, kind);
+    if (graphs == nullptr || graphs->empty()) {
+        return kNoRegionOutlineDist;
+    }
+    return distToOutlineGraphs(worldPos, *graphs);
 }
 
 void buildTerrainDebugMeshes(TerrainAtlas& atlas, float pixelsPerUnit, float contourWidth) {
@@ -667,24 +758,45 @@ void buildTerrainDebugMeshes(TerrainAtlas& atlas, float pixelsPerUnit, float con
 
     appendContourGraphMesh(atlas.debugForbiddenMesh, atlas.forbiddenPolygons, pixelsPerUnit,
                            contourWidth, sf::Color(255, 0, 255), false);
-    appendContourGraphMesh(atlas.debugRiverMesh, atlas.riverOutlines, pixelsPerUnit, contourWidth,
-                           sf::Color(0, 255, 255), false);
-    appendContourGraphMesh(atlas.debugShoreMesh, atlas.seaOutlines, pixelsPerUnit, contourWidth,
-                           sf::Color(255, 255, 0), false);
-    appendContourGraphMesh(atlas.debugForestMesh, atlas.forestPolygons, pixelsPerUnit, contourWidth,
-                           sf::Color(0, 220, 0), true);
-    appendContourGraphMesh(atlas.debugHillsMesh, atlas.hillsPolygons, pixelsPerUnit, contourWidth,
-                           sf::Color(255, 140, 0), true);
+    const TerrainId seaId = atlas.catalog != nullptr ? atlas.catalog->resolveKey("sea")
+                                                     : kTerrainUnknown;
+    const TerrainId riverId = atlas.catalog != nullptr ? atlas.catalog->resolveKey("river")
+                                                       : kTerrainUnknown;
+    const TerrainId forestId = atlas.catalog != nullptr ? atlas.catalog->resolveKey("forest")
+                                                        : kTerrainUnknown;
+    const TerrainId hillsId = atlas.catalog != nullptr ? atlas.catalog->resolveKey("hills")
+                                                       : kTerrainUnknown;
+    const auto* river = atlas.outlineGraphs(riverId);
+    const auto* sea = atlas.outlineGraphs(seaId);
+    const auto* forest = atlas.outlineGraphs(forestId);
+    const auto* hills = atlas.outlineGraphs(hillsId);
+    if (river != nullptr) {
+        appendContourGraphMesh(atlas.debugRiverMesh, *river, pixelsPerUnit, contourWidth,
+                               sf::Color(0, 255, 255), false);
+    }
+    if (sea != nullptr) {
+        appendContourGraphMesh(atlas.debugShoreMesh, *sea, pixelsPerUnit, contourWidth,
+                               sf::Color(255, 255, 0), false);
+    }
+    if (forest != nullptr) {
+        appendContourGraphMesh(atlas.debugForestMesh, *forest, pixelsPerUnit, contourWidth,
+                               sf::Color(0, 220, 0), false);
+    }
+    if (hills != nullptr) {
+        appendContourGraphMesh(atlas.debugHillsMesh, *hills, pixelsPerUnit, contourWidth,
+                               sf::Color(140, 120, 90), false);
+    }
 }
 
-TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& projectRoot) {
+TerrainAtlas bakeTerrain(const Config& config, const TerrainCatalog& catalog,
+                         const std::filesystem::path& projectRoot) {
     PROFILE_SCOPE(ProfileScopeId::TerrainBake);
     TerrainAtlas atlas;
 
     const auto imagePath  = projectRoot / config.terrain.imagePath;
     const auto colorsPath = projectRoot / config.terrain.colorsPath;
 
-    const std::vector<TerrainColorEntry> colorMap = loadTerrainColorMap(colorsPath);
+    const std::vector<TerrainColorEntry> colorMap = loadTerrainColorMap(colorsPath, catalog);
     if (colorMap.empty()) {
         Logger::log("terrain", "bake failed: no color map at " + colorsPath.string());
         return atlas;
@@ -703,9 +815,11 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
     const float simplify       = config.terrain.simplifyTolerance;
     const float waterInset     = config.terrain.waterInset;
     const float shoreInset     = config.terrain.shoreInset;
+    const float riverInset     = config.terrain.riverInset;
     const float contourWidth   = config.terrain.contourWidth;
     const int   waterInsetPx   = worldUnitsToPixelRadius(waterInset, diagramW, w);
     const int   shoreInsetPx   = worldUnitsToPixelRadius(shoreInset, diagramW, w);
+    const int   riverInsetPx   = worldUnitsToPixelRadius(riverInset, diagramW, w);
 
     atlas.sourceW   = w;
     atlas.sourceH   = h;
@@ -713,7 +827,15 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
     atlas.diagramH  = diagramH;
     atlas.waterInset = waterInset;
     atlas.shoreInset = shoreInset;
-    atlas.raster.assign(static_cast<std::size_t>(w * h), TerrainKind::Unknown);
+    atlas.catalog    = &catalog;
+    atlas.raster.assign(static_cast<std::size_t>(w * h), kTerrainUnknown);
+
+    const TerrainId seaId      = catalog.resolveKey("sea");
+    const TerrainId riverId    = catalog.resolveKey("river");
+    const TerrainId plainsId   = catalog.resolveKey("plains");
+    const TerrainId forestId   = catalog.resolveKey("forest");
+    const TerrainId hillsId    = catalog.resolveKey("hills");
+    const TerrainId mountainId = catalog.resolveKey("mountain");
 
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
@@ -723,26 +845,53 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
         }
     }
 
-    const auto kindAt = [&](int x, int y) -> TerrainKind {
+    const auto kindAt = [&](int x, int y) -> TerrainId {
         if (x < 0 || y < 0 || x >= w || y >= h) {
-            return TerrainKind::Unknown;
+            return kTerrainUnknown;
         }
         return atlas.raster[static_cast<std::size_t>(gridIndex(x, y, w))];
     };
 
     const auto insideForbidden = [&](int x, int y) -> bool {
-        return terrainKindIsForbidden(kindAt(x, y));
+        return terrainIdIsForbidden(kindAt(x, y), catalog);
     };
-    const auto insideSea = [&](int x, int y) -> bool { return kindAt(x, y) == TerrainKind::Sea; };
-    const auto insideRiver = [&](int x, int y) -> bool {
-        return kindAt(x, y) == TerrainKind::River;
-    };
-    const auto insideForest = [&](int x, int y) -> bool {
-        return kindAt(x, y) == TerrainKind::Forest;
-    };
+    const auto insideSea = [&](int x, int y) -> bool { return kindAt(x, y) == seaId; };
+    const auto insideRiver = [&](int x, int y) -> bool { return kindAt(x, y) == riverId; };
+    const auto insideForest = [&](int x, int y) -> bool { return kindAt(x, y) == forestId; };
     const auto insideHills = [&](int x, int y) -> bool {
-        const TerrainKind kind = kindAt(x, y);
-        return kind == TerrainKind::Hills || kind == TerrainKind::Mountain;
+        const TerrainId id = kindAt(x, y);
+        return id == hillsId || id == mountainId;
+    };
+
+    const auto insidePlains = [&](int x, int y) -> bool { return kindAt(x, y) == plainsId; };
+
+    int countPlains = 0;
+    int countForest = 0;
+    int countHills  = 0;
+    int countMountain = 0;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const TerrainId id = kindAt(x, y);
+            if (id == plainsId) {
+                ++countPlains;
+            } else if (id == forestId) {
+                ++countForest;
+            } else if (id == hillsId) {
+                ++countHills;
+            } else if (id == mountainId) {
+                ++countMountain;
+            }
+        }
+    }
+    atlas.majorityLandId = computeMajorityLandId(plainsId, forestId, hillsId, mountainId,
+                                                  countPlains, countForest, countHills,
+                                                  countMountain);
+
+    const auto buildLandOutlines =
+        [&](const std::function<bool(int, int)>& inside) -> std::vector<std::vector<Vec2>> {
+        const auto polylines = extractInterfacePolylines(inside, w, h, diagramW, diagramH);
+        return buildContourGraphs(polylines, simplify, false, true, atlas.raster, w, h, diagramW,
+                                  diagramH, catalog);
     };
 
     const std::vector<uint8_t> rawForbiddenMask = buildMask(insideForbidden, w, h);
@@ -751,27 +900,37 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
     const std::vector<uint8_t> rawSeaMask = buildMask(insideSea, w, h);
     const std::vector<uint8_t> shoreTraceMask =
         dilateMask(rawSeaMask, w, h, shoreInsetPx);
+    const std::vector<uint8_t> rawRiverMask = buildMask(insideRiver, w, h);
+    const std::vector<uint8_t> riverTraceMask =
+        dilateMask(rawRiverMask, w, h, riverInsetPx);
 
     const auto traceForbidden = maskPredicate(atlas.forbiddenDilated, w, h);
     const auto traceShore     = maskPredicate(shoreTraceMask, w, h);
+    const auto traceRiverBank = maskPredicate(riverTraceMask, w, h);
 
     const auto forbiddenLoops = extractInterfacePolylines(traceForbidden, w, h, diagramW, diagramH);
     const auto shoreLoops     = extractInterfacePolylines(traceShore, w, h, diagramW, diagramH);
-    const auto riverPolylines = extractInterfacePolylines(insideRiver, w, h, diagramW, diagramH);
-    const auto forestLoops    = traceExactContours(insideForest, w, h, diagramW, diagramH);
-    const auto hillsLoops     = traceExactContours(insideHills, w, h, diagramW, diagramH);
+    const auto riverPolylines = extractInterfacePolylines(traceRiverBank, w, h, diagramW, diagramH);
 
     atlas.forbiddenPolygons =
         buildContourGraphs(forbiddenLoops, simplify, false, true, atlas.raster, w, h, diagramW,
-                           diagramH);
-    atlas.seaOutlines = buildContourGraphs(shoreLoops, simplify, false, true, atlas.raster, w, h,
-                                           diagramW, diagramH);
-    atlas.riverOutlines = buildContourGraphs(riverPolylines, simplify, false, true, atlas.raster,
-                                             w, h, diagramW, diagramH);
-    atlas.forestPolygons = buildContourGraphs(forestLoops, simplify, true, false, atlas.raster, w,
-                                              h, diagramW, diagramH);
-    atlas.hillsPolygons  = buildContourGraphs(hillsLoops, simplify, true, false, atlas.raster, w, h,
-                                             diagramW, diagramH);
+                           diagramH, catalog);
+    atlas.outlinesByTerrainId[seaId] = buildContourGraphs(shoreLoops, simplify, false, true,
+                                                          atlas.raster, w, h, diagramW, diagramH,
+                                                          catalog);
+    atlas.outlinesByTerrainId[riverId] =
+        buildContourGraphs(riverPolylines, simplify, false, true, atlas.raster, w, h, diagramW,
+                           diagramH, catalog);
+
+    if (atlas.majorityLandId != forestId) {
+        atlas.outlinesByTerrainId[forestId] = buildLandOutlines(insideForest);
+    }
+    if (atlas.majorityLandId != hillsId && atlas.majorityLandId != mountainId) {
+        atlas.outlinesByTerrainId[hillsId] = buildLandOutlines(insideHills);
+    }
+    if (atlas.majorityLandId != plainsId) {
+        atlas.outlinesByTerrainId[plainsId] = buildLandOutlines(insidePlains);
+    }
 
     if (config.terrain.corridorRoadsEnabled) {
         const float shoreRoadInset     = config.terrain.shoreRoadInset;
@@ -779,11 +938,11 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
         const float corridorEdgeSpacing = config.terrain.corridorEdgeSpacing;
         atlas.shoreRoadGraph = simplifyContourGraphs(
             buildWaterContourGraph(insideSea, w, h, diagramW, diagramH, shoreRoadInset,
-                                   corridorEdgeSpacing, atlas.raster),
+                                   corridorEdgeSpacing, atlas.raster, catalog),
             0.5f);
         atlas.riverRoadGraph = simplifyContourGraphs(
             buildWaterContourGraph(insideRiver, w, h, diagramW, diagramH, riverRoadInset,
-                                   corridorEdgeSpacing, atlas.raster),
+                                   corridorEdgeSpacing, atlas.raster, catalog),
             0.5f);
     }
 
@@ -811,16 +970,27 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
                     + std::to_string(forestComponents) + " hills="
                     + std::to_string(hillsComponents) + " edge_spacing=" + std::to_string(simplify)
                     + " water_inset=" + std::to_string(waterInset) + " shore_inset="
-                    + std::to_string(shoreInset) + " forbidden_nodes="
+                    + std::to_string(shoreInset) + " river_inset="
+                    + std::to_string(riverInset) + " forbidden_nodes="
                     + std::to_string(countContourVertices(atlas.forbiddenPolygons))
                     + " forbidden_edges="
                     + std::to_string(countContourEdges(atlas.forbiddenPolygons, false))
-                    + " shore_nodes=" + std::to_string(countContourVertices(atlas.seaOutlines))
-                    + " shore_edges=" + std::to_string(countContourEdges(atlas.seaOutlines, false))
-                    + " river_nodes=" + std::to_string(countContourVertices(atlas.riverOutlines))
-                    + " river_edges=" + std::to_string(countContourEdges(atlas.riverOutlines, false))
-                    + " forest_nodes=" + std::to_string(countContourVertices(atlas.forestPolygons))
-                    + " hills_nodes=" + std::to_string(countContourVertices(atlas.hillsPolygons))
+                    + " shore_nodes=" + std::to_string(countContourVertices(
+                                          atlas.outlinesByTerrainId[seaId]))
+                    + " shore_edges=" + std::to_string(countContourEdges(
+                                          atlas.outlinesByTerrainId[seaId], false))
+                    + " river_nodes=" + std::to_string(countContourVertices(
+                                          atlas.outlinesByTerrainId[riverId]))
+                    + " river_edges=" + std::to_string(countContourEdges(
+                                          atlas.outlinesByTerrainId[riverId], false))
+                    + " majority_land="
+                    + std::string(terrainIdName(atlas.majorityLandId, catalog))
+                    + " forest_nodes=" + std::to_string(countContourVertices(
+                                          atlas.outlinesByTerrainId[forestId]))
+                    + " hills_nodes=" + std::to_string(countContourVertices(
+                                          atlas.outlinesByTerrainId[hillsId]))
+                    + " plains_nodes=" + std::to_string(countContourVertices(
+                                          atlas.outlinesByTerrainId[plainsId]))
                     + (config.terrain.corridorRoadsEnabled
                            ? " shore_road_inset=" + std::to_string(config.terrain.shoreRoadInset)
                                  + " river_road_inset="
@@ -832,6 +1002,18 @@ TerrainAtlas bakeTerrain(const Config& config, const std::filesystem::path& proj
                                  + " river_road_nodes="
                                  + std::to_string(countContourVertices(atlas.riverRoadGraph))
                            : std::string(" corridor_roads=off")));
+
+    const int riverNodes =
+        static_cast<int>(countContourVertices(atlas.outlinesByTerrainId[riverId]));
+    if (riverComponents > 0 && riverNodes == 0) {
+        Logger::log("terrain",
+                    "bake warning: river_components=" + std::to_string(riverComponents)
+                        + " but river_nodes=0 (check river_inset / simplify_tolerance)");
+    }
+    if (riverComponents == 0) {
+        Logger::log("terrain",
+                    "bake warning: river_components=0 (no classified river pixels in raster)");
+    }
 
     return atlas;
 }

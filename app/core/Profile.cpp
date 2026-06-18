@@ -53,6 +53,8 @@ const char* profileScopeName(ProfileScopeId id) {
         return "PlacementPrep";
     case ProfileScopeId::RingBump:
         return "RingBump";
+    case ProfileScopeId::MovableRelocate:
+        return "MovableRelocate";
     case ProfileScopeId::GapFillCollect:
         return "GapFillCollect";
     case ProfileScopeId::GapFillTrySlot:
@@ -75,6 +77,20 @@ const char* profileScopeName(ProfileScopeId id) {
         return "MeshHopDebug";
     case ProfileScopeId::MeshJunction:
         return "MeshJunction";
+    case ProfileScopeId::TerrainBorderPlace:
+        return "TerrainBorderPlace";
+    case ProfileScopeId::BorderCandidateLayout:
+        return "BorderCandidateLayout";
+    case ProfileScopeId::TerrainScanPeek:
+        return "TerrainScanPeek";
+    case ProfileScopeId::TerrainScanTrySlot:
+        return "TerrainScanTrySlot";
+    case ProfileScopeId::RebuildPlacementFrontier:
+        return "RebuildPlacementFrontier";
+    case ProfileScopeId::RebuildTerrainScanFrontier:
+        return "RebuildTerrainScanFrontier";
+    case ProfileScopeId::RebuildBorderFrontier:
+        return "RebuildBorderFrontier";
     default:
         return "Unknown";
     }

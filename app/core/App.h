@@ -1,11 +1,14 @@
 #pragma once
 
+#include <unordered_set>
+
 #include "BuildingGrowthQueue.h"
 #include "Camera.h"
 #include "Config.h"
 #include "DefCache.h"
 #include "Hud.h"
 #include "TerrainAtlas.h"
+#include "TerrainCatalog.h"
 #include "Town.h"
 #include "PlacementFloors.h"
 #include "TownConfig.h"
@@ -14,8 +17,9 @@
 
 class App {
 public:
-    App(const Config& config, const TownConfig& townConfig, const DefCache& defs,
-        TerrainAtlas terrainAtlas, PlacementFloors placementFloors, GrowthConfig growthAuto = {});
+    App(const Config& config, const TownConfig& townConfig, const TerrainCatalog& terrainCatalog,
+        const DefCache& defs, TerrainAtlas terrainAtlas, PlacementFloors placementFloors,
+        GrowthConfig growthAuto = {});
 
     int run();
 
@@ -26,15 +30,21 @@ private:
     void syncBuildingPlacements();
     void tickAutoGrow();
     int  finishAutoGrowAndExit();
+    void writeMemoryReportOnce();
     int  effectiveAutoGrowTarget() const;
     void drawFrontageSegmentLabels();
     void drawPlotLabels();
     void drawBuildingLabels();
     void drawRoadLabels();
+    void drawTerrainPlotTypeLabels();
     void drawIdLabels(const std::vector<FrontageSegmentLabel>& labels);
+    void drawIdLabels(const std::vector<FrontageSegmentLabel>& labels,
+                      const std::unordered_set<int>* onlyIds);
+    std::unordered_set<int> terrainBuildingLabelIds() const;
 
     Config              config_;
     TownConfig          townConfig_;
+    TerrainCatalog      terrainCatalog_;
     DefCache            defs_;
     PlacementFloors     placementFloors_;
     TerrainAtlas        terrainAtlas_;
@@ -51,8 +61,10 @@ private:
     int                 lastActiveCount_ = -1;
     TerrainOverlayMode  terrainOverlayMode_ = TerrainOverlayMode::TerrainAndDebug;
     bool                hopZoneTintEnabled_ = false;
+    bool                showBiomePlots_     = false;
     GrowthConfig        growthAuto_;
     bool                inAppAutoGrow_      = false;
     sf::Clock           autoGrowClock_;
     bool                autoGrowFinished_   = false;
+    bool                memoryReportWritten_ = false;
 };

@@ -110,6 +110,9 @@ Config Config::load(const std::filesystem::path& path) {
         if (p["frontage_setback"]) {
             config.plots.frontageSetback = p["frontage_setback"].as<float>();
         }
+        if (p["terrain_anchor_max_roads"]) {
+            config.plots.terrainAnchorMaxRoads = p["terrain_anchor_max_roads"].as<int>();
+        }
     }
 
     if (auto v = root["voronoi"]) {
@@ -158,6 +161,11 @@ Config Config::load(const std::filesystem::path& path) {
         }
         if (t["shore_inset"]) {
             config.terrain.shoreInset = t["shore_inset"].as<float>();
+        }
+        if (t["river_inset"]) {
+            config.terrain.riverInset = t["river_inset"].as<float>();
+        } else if (t["shore_inset"]) {
+            config.terrain.riverInset = config.terrain.shoreInset;
         }
         if (t["contour_width"]) {
             config.terrain.contourWidth = t["contour_width"].as<float>();

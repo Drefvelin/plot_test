@@ -66,6 +66,11 @@ bool tryPlaceRuralOnRoads(Town& town, BuildingInstance& instance, const DefCache
                           PlacementSearchLog& searchLog, const TerrainAtlas* terrain,
                           const std::vector<int>& junctionHops, const PlacementPrep& prep,
                           RoadAttemptMemo& memo);
+bool tryPlaceAnyOnRoads(Town& town, BuildingInstance& instance, const DefCache& defs,
+                        const PlotConfig& plots, int townSeed, int maxBuildings,
+                        PlacementSearchLog& searchLog, const TerrainAtlas* terrain,
+                        const std::vector<int>& junctionHops, const PlacementPrep& prep,
+                        RoadAttemptMemo& memo);
 void logRingState(const Town& town);
 void rebuildHopDebugRoadMesh(Town& town, const std::vector<int>& junctionHops, float pixelsPerUnit);
 void rebuildHopDebugJunctionMesh(Town& town, const std::vector<int>& junctionHops,

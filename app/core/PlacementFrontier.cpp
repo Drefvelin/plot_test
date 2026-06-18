@@ -4,11 +4,13 @@
 #include "FrontageZones.h"
 #include "Logger.h"
 #include "PlotGeometry.h"
+#include "Profile.h"
 #include "RoadExhaustion.h"
 #include "Town.h"
 
 #include <algorithm>
 #include <cmath>
+#include <random>
 #include <unordered_set>
 
 bool resolveFrontierRefSegment(const Town& town, const FrontierRef& ref, bool wallBucket,
@@ -31,6 +33,20 @@ bool refLess(const FrontierRef& lhs, const FrontierRef& rhs) {
         return lhs.bankIndex < rhs.bankIndex;
     }
     return lhs.startT < rhs.startT;
+}
+
+bool relocatingShufflePeers(const Town& town) {
+    return town.relocatingInstanceId != 0xFFFFFFFFu;
+}
+
+void shuffleRelocateRefs(const Town& town, std::vector<FrontierRef>& refs) {
+    if (refs.size() <= 1) {
+        return;
+    }
+    std::seed_seq seed{static_cast<int>(town.relocatingInstanceId), town.suburbanMaxHop,
+                       static_cast<int>(town.frontierManager.generation), 7919};
+    std::mt19937 rng(seed);
+    std::shuffle(refs.begin(), refs.end(), rng);
 }
 
 void insertSortedPlot(std::vector<FrontierRef>& bucket, FrontierRef ref) {
@@ -62,12 +78,13 @@ void erasePlotRef(std::vector<FrontierRef>& bucket, const FrontierRef& ref) {
                  bucket.end());
 }
 
-FrontierRef refFromSegment(int roadId, int bankIndex, const RoadFrontageSegment& segment) {
+FrontierRef refFromSegment(const Town& town, int roadId, int bankIndex,
+                           const RoadFrontageSegment& segment) {
     FrontierRef ref;
     ref.roadId     = roadId;
     ref.bankIndex  = bankIndex;
     ref.segmentId  = segment.id;
-    ref.centerDist = segment.centerDist;
+    ref.centerDist = roadCenterDist(town, roadId);
     ref.startT     = segment.startT;
     ref.endT       = segment.endT;
     return ref;
@@ -107,7 +124,7 @@ bool segmentEligibleForWall(const Town& town, const Road& road, int bankIndex,
 }
 
 void removePlotRefsForBank(Town& town, int roadId, int bankIndex) {
-    for (auto& bucket : town.frontiers.plot) {
+    for (auto& bucket : town.frontierManager.plot) {
         bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
                                     [roadId, bankIndex](const FrontierRef& ref) {
                                         return ref.roadId == roadId && ref.bankIndex == bankIndex;
@@ -117,7 +134,7 @@ void removePlotRefsForBank(Town& town, int roadId, int bankIndex) {
 }
 
 void removeWallRefsForBank(Town& town, int roadId, int bankIndex) {
-    for (auto& bucket : town.frontiers.wall) {
+    for (auto& bucket : town.frontierManager.wall) {
         bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
                                     [roadId, bankIndex](const FrontierRef& ref) {
                                         return ref.roadId == roadId && ref.bankIndex == bankIndex;
@@ -127,12 +144,12 @@ void removeWallRefsForBank(Town& town, int roadId, int bankIndex) {
 }
 
 void removeAlleyRefsForBank(Town& town, int roadId, int bankIndex) {
-    town.frontiers.alley.erase(
-        std::remove_if(town.frontiers.alley.begin(), town.frontiers.alley.end(),
+    town.frontierManager.alley.erase(
+        std::remove_if(town.frontierManager.alley.begin(), town.frontierManager.alley.end(),
                        [roadId, bankIndex](const AlleyFrontierRef& ref) {
                            return ref.roadId == roadId && ref.bankIndex == bankIndex;
                        }),
-        town.frontiers.alley.end());
+        town.frontierManager.alley.end());
 }
 
 void addPlotSegmentsForBank(Town& town, int roadId, int bankIndex) {
@@ -148,9 +165,9 @@ void addPlotSegmentsForBank(Town& town, int roadId, int bankIndex) {
         if (!segmentEligibleForPlot(town, road, bankIndex, segment)) {
             continue;
         }
-        const FrontierBand band = classifyFrontierBand(segment.centerDist, town);
-        insertSortedPlot(town.frontiers.plot[static_cast<std::size_t>(band)],
-                         refFromSegment(roadId, bankIndex, segment));
+        const FrontierBand band = roadFrontierBand(town, road.id);
+        insertSortedPlot(town.frontierManager.plot[static_cast<std::size_t>(band)],
+                         refFromSegment(town, roadId, bankIndex, segment));
     }
 }
 
@@ -167,9 +184,9 @@ void addWallSegmentsForBank(Town& town, int roadId, int bankIndex, float minGapW
         if (!segmentEligibleForWall(town, road, bankIndex, segment, minGapWidth)) {
             continue;
         }
-        const FrontierBand band = classifyFrontierBand(segment.centerDist, town);
-        insertSortedPlot(town.frontiers.wall[static_cast<std::size_t>(band)],
-                         refFromSegment(roadId, bankIndex, segment));
+        const FrontierBand band = roadFrontierBand(town, road.id);
+        insertSortedPlot(town.frontierManager.wall[static_cast<std::size_t>(band)],
+                         refFromSegment(town, roadId, bankIndex, segment));
     }
 }
 
@@ -199,8 +216,8 @@ void addAlleyGapsForBank(Town& town, int roadId, int bankIndex, float minGapWidt
         if (isAlleyGapChecked(town, gap)) {
             continue;
         }
-        const float centerDist = (gap.gapMidPoint() - town.center).length();
-        if (centerDist > maxDistInclusive + kDistEps) {
+        const float roadDist = roadCenterDist(town, roadId);
+        if (roadDist > maxDistInclusive + kDistEps) {
             continue;
         }
         AlleyFrontierRef ref;
@@ -209,38 +226,31 @@ void addAlleyGapsForBank(Town& town, int roadId, int bankIndex, float minGapWidt
         ref.segmentId  = segment.id;
         ref.tMin       = segment.startT;
         ref.tMax       = segment.endT;
-        ref.centerDist = centerDist;
-        insertSortedAlley(town.frontiers.alley, ref);
+        ref.centerDist = roadDist;
+        insertSortedAlley(town.frontierManager.alley, ref);
     }
 }
 
 bool peekClosestInBuckets(const Town& town, const FrontierBandSet& bands, float minWidth,
                           const std::unordered_set<int>& skipSegmentIds, bool wallBuckets,
                           FrontierRef& outRef) {
-    bool         found     = false;
-    float        bestDist    = 1e30f;
-    FrontierBand bestBand    = FrontierBand::Core;
-    std::size_t  bestIndex   = 0;
+    std::vector<FrontierRef> eligible;
 
     const auto consider = [&](FrontierBand band) {
         const std::size_t bi = static_cast<std::size_t>(band);
         const std::vector<FrontierRef>& bucket =
-            wallBuckets ? town.frontiers.wall[bi] : town.frontiers.plot[bi];
-        for (std::size_t i = 0; i < bucket.size(); ++i) {
-            const FrontierRef& ref = bucket[i];
+            wallBuckets ? town.frontierManager.wall[bi] : town.frontierManager.plot[bi];
+        for (const FrontierRef& ref : bucket) {
             if (skipSegmentIds.count(ref.segmentId) != 0) {
                 continue;
             }
             if (ref.endT - ref.startT + kDistEps < minWidth) {
                 continue;
             }
-            if (!found || ref.centerDist + kDistEps < bestDist) {
-                found     = true;
-                bestDist  = ref.centerDist;
-                bestBand  = band;
-                bestIndex = i;
-                outRef    = ref;
+            if (town.relocatingHostRoadId >= 0 && ref.roadId == town.relocatingHostRoadId) {
+                continue;
             }
+            eligible.push_back(ref);
         }
     };
 
@@ -254,12 +264,17 @@ bool peekClosestInBuckets(const Town& town, const FrontierBandSet& bands, float 
         consider(FrontierBand::Rural);
     }
 
-    if (!found) {
+    if (eligible.empty()) {
         return false;
     }
 
-    outRef = wallBuckets ? town.frontiers.wall[static_cast<std::size_t>(bestBand)][bestIndex]
-                         : town.frontiers.plot[static_cast<std::size_t>(bestBand)][bestIndex];
+    if (relocatingShufflePeers(town)) {
+        shuffleRelocateRefs(town, eligible);
+        outRef = eligible[0];
+        return true;
+    }
+
+    outRef = *std::min_element(eligible.begin(), eligible.end(), refLess);
     return true;
 }
 
@@ -276,7 +291,7 @@ bool fillFrontageSlotFromRef(const Town& town, const FrontierRef& ref, bool wall
     outSlot.bankIndex  = ref.bankIndex;
     outSlot.startT     = segment.startT;
     outSlot.endT       = segment.endT;
-    outSlot.centerDist = segment.centerDist;
+    outSlot.centerDist = roadCenterDist(town, ref.roadId);
     outSlot.zoneScore  = 0.f;
     outSlot.isWallGap  = wallBucket;
     return true;
@@ -352,7 +367,7 @@ void frontierExtendBands(Town& town, float prevSuburbanMaxDist, float prevCoreMa
                         + " core_dist=" + std::to_string(static_cast<int>(coreDist)));
     }
 
-    ++town.frontiers.generation;
+    ++town.frontierManager.generation;
 }
 
 FrontierBandSet FrontierBandSet::townRing() {
@@ -377,6 +392,10 @@ FrontierBand classifyFrontierBand(float centerDist, const Town& town) {
         return FrontierBand::Core;
     }
     return FrontierBand::Suburban;
+}
+
+FrontierBand roadFrontierBand(const Town& town, int roadId) {
+    return classifyFrontierBand(roadCenterDist(town, roadId), town);
 }
 
 FrontierBandSet frontierBandsFromDistFilter(const Town& town, float minDistInclusive,
@@ -409,13 +428,14 @@ FrontierBandSet frontierBandsFromDistFilter(const Town& town, float minDistInclu
 }
 
 void rebuildPlacementFrontier(Town& town) {
-    for (auto& bucket : town.frontiers.plot) {
+    PROFILE_SCOPE(ProfileScopeId::RebuildPlacementFrontier);
+    for (auto& bucket : town.frontierManager.plot) {
         bucket.clear();
     }
-    for (auto& bucket : town.frontiers.wall) {
+    for (auto& bucket : town.frontierManager.wall) {
         bucket.clear();
     }
-    town.frontiers.alley.clear();
+    town.frontierManager.alley.clear();
 
     const float minGapWidth = town.syncMinGapWidth;
     const float coreMaxDist = urbanCoreMaxDist(town);
@@ -434,7 +454,7 @@ void rebuildPlacementFrontier(Town& town) {
         }
     }
 
-    ++town.frontiers.generation;
+    ++town.frontierManager.generation;
 }
 
 void frontierRefreshPlotBank(Town& town, int roadId, int bankIndex) {
@@ -476,7 +496,7 @@ bool peekClosestPlotSlot(const Town& town, const FrontierBandSet& bands, float m
 
 void consumePlotSlot(Town& town, const FrontierRef& ref) {
     const FrontierBand band = classifyFrontierBand(ref.centerDist, town);
-    erasePlotRef(town.frontiers.plot[static_cast<std::size_t>(band)], ref);
+    erasePlotRef(town.frontierManager.plot[static_cast<std::size_t>(band)], ref);
 }
 
 bool peekClosestWallGapSlot(const Town& town, const FrontierBandSet& bands, float minWidth,
@@ -490,7 +510,7 @@ bool peekClosestWallGapSlot(const Town& town, const FrontierBandSet& bands, floa
 
 void consumeWallGapSlot(Town& town, const FrontierRef& ref) {
     const FrontierBand band = classifyFrontierBand(ref.centerDist, town);
-    erasePlotRef(town.frontiers.wall[static_cast<std::size_t>(band)], ref);
+    erasePlotRef(town.frontierManager.wall[static_cast<std::size_t>(band)], ref);
 }
 
 bool peekClosestAlleyGap(const Town& town, float maxDistInclusive, float minGapWidth,
@@ -500,8 +520,8 @@ bool peekClosestAlleyGap(const Town& town, float maxDistInclusive, float minGapW
     float       bestDist  = 1e30f;
     std::size_t bestIndex = 0;
 
-    for (std::size_t i = 0; i < town.frontiers.alley.size(); ++i) {
-        const AlleyFrontierRef& ref = town.frontiers.alley[i];
+    for (std::size_t i = 0; i < town.frontierManager.alley.size(); ++i) {
+        const AlleyFrontierRef& ref = town.frontierManager.alley[i];
         if (skipSegmentIds.count(ref.segmentId) != 0) {
             continue;
         }
@@ -523,7 +543,7 @@ bool peekClosestAlleyGap(const Town& town, float maxDistInclusive, float minGapW
         return false;
     }
 
-    outRef = town.frontiers.alley[bestIndex];
+    outRef = town.frontierManager.alley[bestIndex];
     if (outRef.roadId < 0 || outRef.roadId >= static_cast<int>(town.roads.size())) {
         return false;
     }
@@ -543,30 +563,30 @@ bool peekClosestAlleyGap(const Town& town, float maxDistInclusive, float minGapW
 }
 
 void consumeAlleyGap(Town& town, const AlleyFrontierRef& ref) {
-    town.frontiers.alley.erase(
-        std::remove_if(town.frontiers.alley.begin(), town.frontiers.alley.end(),
+    town.frontierManager.alley.erase(
+        std::remove_if(town.frontierManager.alley.begin(), town.frontierManager.alley.end(),
                        [&](const AlleyFrontierRef& entry) {
                            return entry.roadId == ref.roadId && entry.bankIndex == ref.bankIndex
                                   && entry.segmentId == ref.segmentId;
                        }),
-        town.frontiers.alley.end());
+        town.frontierManager.alley.end());
 }
 
 void frontierRemoveAlleyGap(Town& town, int roadId, int bankIndex, float tMin, float tMax) {
-    town.frontiers.alley.erase(
-        std::remove_if(town.frontiers.alley.begin(), town.frontiers.alley.end(),
+    town.frontierManager.alley.erase(
+        std::remove_if(town.frontierManager.alley.begin(), town.frontierManager.alley.end(),
                        [&](const AlleyFrontierRef& entry) {
                            return entry.roadId == roadId && entry.bankIndex == bankIndex
                                   && std::abs(entry.tMin - tMin) < 0.1f
                                   && std::abs(entry.tMax - tMax) < 0.1f;
                        }),
-        town.frontiers.alley.end());
+        town.frontierManager.alley.end());
 }
 
 bool placementFrontierHasUncheckedAlleyInCore(const Town& town, float minGapWidth,
                                               float maxDistInclusive) {
     constexpr float kDistEps = 1e-3f;
-    for (const AlleyFrontierRef& ref : town.frontiers.alley) {
+    for (const AlleyFrontierRef& ref : town.frontierManager.alley) {
         if (ref.centerDist > maxDistInclusive + kDistEps) {
             continue;
         }
@@ -605,7 +625,7 @@ PlotFrontierAudit auditPlotFrontier(const Town& town, const FrontierBandSet& ban
 
     std::unordered_set<int> frontierSegmentIds;
     const auto collectFrontier = [&](FrontierBand band) {
-        for (const FrontierRef& ref : town.frontiers.plot[static_cast<std::size_t>(band)]) {
+        for (const FrontierRef& ref : town.frontierManager.plot[static_cast<std::size_t>(band)]) {
             ++audit.frontierRefs;
             if (band == FrontierBand::Core) {
                 ++audit.coreRefs;
@@ -647,7 +667,7 @@ PlotFrontierAudit auditPlotFrontier(const Town& town, const FrontierBandSet& ban
                 if (!segmentEligibleForPlot(town, road, bankIndex, segment)) {
                     continue;
                 }
-                const FrontierBand band = classifyFrontierBand(segment.centerDist, town);
+                const FrontierBand band = roadFrontierBand(town, road.id);
                 const bool inBand = (band == FrontierBand::Core && bands.core)
                                     || (band == FrontierBand::Suburban && bands.suburban)
                                     || (band == FrontierBand::Rural && bands.rural);

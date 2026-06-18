@@ -18,6 +18,7 @@ enum class PlacementBand {
 };
 
 float         roadMidpointCenterDist(const Town& town, const Road& road);
+float         roadCenterDist(const Town& town, int roadId);
 float         ringDistAtHop(const Town& town, int hop);
 float         suburbanMaxDist(const Town& town);
 float         urbanCoreMaxDist(const Town& town);
@@ -44,3 +45,9 @@ float scoreSegmentForZone(const Town& town, const FrontageSlot& slot, const char
 const char* zoneTypeForBuilding(const DefCache& defs, const std::string& buildingType);
 float bandMinFrontage(const DefCache& defs, const std::string& buildingType, float segWidth,
                       float maxDepthToFrontRatio);
+
+int  instanceHostRoadId(const BuildingInstance& inst);
+bool roadBandChanged(const Town& town, const Road& road, float prevSuburbanDist,
+                     float prevCoreDist);
+bool buildingCompatibleWithRoadBand(const DefCache& defs, const BuildingInstance& inst,
+                                    const Town& town, int roadId);

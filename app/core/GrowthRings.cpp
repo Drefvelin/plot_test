@@ -5,9 +5,15 @@
 #include "FrontageGapFill.h"
 #include "FrontagePlacement.h"
 #include "FrontageZones.h"
+#include "FrontierManager.h"
 #include "Logger.h"
+#include "BorderPlacement.h"
+#include "Terrain.h"
+#include "TerrainPlacement.h"
+#include "TerrainPlacementLogging.h"
 #include "PlacementFrontier.h"
 #include "PlacementPrep.h"
+#include "PlotDimensions.h"
 #include "PlotGeometry.h"
 #include "Profile.h"
 #include "RoadExhaustion.h"
@@ -19,6 +25,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <random>
+#include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -33,6 +42,13 @@ bool instanceOnAlleyRoad(const BuildingInstance& instance, int roadId) {
         return instance.plot.roadId == roadId;
     }
     return false;
+}
+
+const char* terrainLabel(TerrainId id, const TerrainAtlas* terrain) {
+    if (terrain == nullptr || terrain->catalog == nullptr) {
+        return "unknown";
+    }
+    return terrainIdName(id, *terrain->catalog);
 }
 
 }  // namespace
@@ -122,26 +138,162 @@ bool tryPlaceOnTownRoad(Town& town, BuildingInstance& instance, const DefCache& 
                         const BandFilter& bandFilter, const std::vector<int>& junctionHops,
                         const PlacementPrep& prep, RoadAttemptMemo& memo) {
     memo.syncContext(town);
+    if (town.relocatingHostRoadId >= 0 && roadId == town.relocatingHostRoadId) {
+        return false;
+    }
     if (memo.shouldSkipRoad(roadId)) {
         return false;
     }
-    if (skipRoadForPlacement(town, defs, instance.buildingType, roadId, junctionHops)) {
+    if (skipRoadForPlacement(town, defs, defs.typeName(instance.typeId), roadId, junctionHops)) {
         return false;
     }
 
-    if (tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance, prep, townSeed,
+    if (tryPlaceRoadPlot(town, defs.typeName(instance.typeId), defs, plots, instance, prep, townSeed,
                          maxBuildings, searchLog, terrain, bandFilter, roadId)) {
         return true;
     }
 
-    if (mayGapFillOnRoad(town, defs, instance.buildingType, roadId)) {
-        if (tryPlaceSegmentMain(town, instance.buildingType, defs, plots, instance, prep, townSeed,
+    if (mayGapFillOnRoad(town, defs, defs.typeName(instance.typeId), roadId)) {
+        if (tryPlaceSegmentMain(town, defs.typeName(instance.typeId), defs, plots, instance, prep, townSeed,
                                 maxBuildings, searchLog, terrain, bandFilter, roadId)) {
             return true;
         }
     }
 
     memo.recordFailure(roadId);
+    return false;
+}
+
+bool tryPlaceNearTerrainAnchor(Town& town, BuildingInstance& instance, const DefCache& defs,
+                               const PlotConfig& plots, int townSeed, int maxBuildings,
+                               PlacementSearchLog& searchLog, const TerrainAtlas* terrain,
+                               const BandFilter& bandFilter,
+                               const std::vector<int>& junctionHops, const PlacementPrep& prep,
+                               RoadAttemptMemo& memo) {
+    const BuildingDef* def = defs.building(instance.typeId);
+    if (def == nullptr || def->terrain.prefer == kTerrainUnknown) {
+        return false;
+    }
+
+    const int anchorRoadId = terrainAnchorRoadFor(town, def->terrain.prefer);
+    if (anchorRoadId < 0) {
+        logTerrainAnchorRoadTry(instance.id, -1, -1, -1.f, "no_anchor",
+                                "prefer=" + std::string(terrainLabel(def->terrain.prefer, terrain)));
+        return false;
+    }
+
+    const int maxRoads = std::max(0, plots.terrainAnchorMaxRoads);
+    const TerrainAnchorBfsResult bfs =
+        collectRoadsNearTerrainAnchor(town, anchorRoadId, maxRoads);
+    if (bfs.selected.empty()) {
+        logTerrainAnchorRoadTry(instance.id, anchorRoadId, 0, -1.f, "empty_bfs",
+                                "max_roads=" + std::to_string(maxRoads));
+        return false;
+    }
+
+    const float suburbanDist = suburbanMaxDist(town);
+    logTerrainAnchorBfs(instance.id, def->terrain.prefer, anchorRoadId, maxRoads, bfs, town,
+                        suburbanDist);
+    logTerrainSegmentLookup(instance.id, 746, town, anchorRoadId, &bfs);
+
+    std::unordered_set<int> selectedSet(bfs.selected.begin(), bfs.selected.end());
+    for (std::size_t vi = 0; vi < bfs.visitOrder.size(); ++vi) {
+        const int roadId = bfs.visitOrder[vi];
+        if (roadId == anchorRoadId || selectedSet.count(roadId) != 0) {
+            continue;
+        }
+        logTerrainAnchorRoadFrontier(instance.id, roadId, town, suburbanDist);
+    }
+
+    resetPlacementSearchLog(searchLog);
+    Logger::log("layout",
+                "ring_rural_list: queueIndex=" + std::to_string(instance.id) + " suburban_max="
+                    + std::to_string(town.suburbanMaxHop) + " mode=terrain_anchor prefer="
+                    + terrainLabel(def->terrain.prefer, terrain) + " anchor_road="
+                    + std::to_string(anchorRoadId) + " nearby=" + std::to_string(bfs.selected.size()));
+
+    std::vector<int> roadOrder = bfs.selected;
+    if (town.relocatingInstanceId != 0xFFFFFFFFu && roadOrder.size() > 1) {
+        std::seed_seq seed{static_cast<int>(town.relocatingInstanceId), town.suburbanMaxHop, 5147};
+        std::mt19937 rng(seed);
+        std::shuffle(roadOrder.begin(), roadOrder.end(), rng);
+    }
+
+    for (std::size_t si = 0; si < roadOrder.size(); ++si) {
+        const int roadId = roadOrder[si];
+        if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+            continue;
+        }
+        if (town.relocatingHostRoadId >= 0 && roadId == town.relocatingHostRoadId) {
+            continue;
+        }
+
+        int graphDist = -1;
+        for (std::size_t vi = 0; vi < bfs.visitOrder.size(); ++vi) {
+            if (bfs.visitOrder[vi] == roadId) {
+                graphDist = bfs.visitDist[vi];
+                break;
+            }
+        }
+
+        const float centerDist =
+            roadMidpointCenterDist(town, town.roads[static_cast<std::size_t>(roadId)]);
+        if (bandFilter.enabled && !distInFilter(centerDist, bandFilter)) {
+            logTerrainAnchorRoadTry(instance.id, roadId, graphDist, centerDist, "band_skip",
+                                    "rural_min=" + fmt1(bandFilter.minDistInclusive));
+            continue;
+        }
+
+        logTerrainAnchorRoadFrontier(instance.id, roadId, town, suburbanDist);
+
+        if (memo.shouldSkipRoad(roadId)) {
+            logTerrainAnchorRoadTry(instance.id, roadId, graphDist, centerDist, "memo_skip", {});
+            continue;
+        }
+        if (skipRoadForPlacement(town, defs, defs.typeName(instance.typeId), roadId, junctionHops)) {
+            logTerrainAnchorRoadTry(instance.id, roadId, graphDist, centerDist, "road_exhausted",
+                                    {});
+            continue;
+        }
+
+        if (tryPlaceRoadPlot(town, defs.typeName(instance.typeId), defs, plots, instance, prep,
+                             townSeed, maxBuildings, searchLog, terrain, bandFilter, roadId)) {
+            const int placedHop = roadHop(town, instance.plot.roadId, junctionHops);
+            logTerrainAnchorRoadTry(instance.id, roadId, graphDist, centerDist, "placed",
+                                    "plot_road=" + std::to_string(instance.plot.roadId) + " seg="
+                                        + std::to_string(searchLog.chosenSegment));
+            Logger::log("layout",
+                        "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
+                            + defs.typeName(instance.typeId) + " roadHop="
+                            + std::to_string(placedHop) + " roadId="
+                            + std::to_string(instance.plot.roadId) + " anchor_road="
+                            + std::to_string(anchorRoadId) + " mode=terrain_anchor prefer="
+                            + terrainLabel(def->terrain.prefer, terrain));
+            return true;
+        }
+
+        if (mayGapFillOnRoad(town, defs, defs.typeName(instance.typeId), roadId)) {
+            if (tryPlaceSegmentMain(town, defs.typeName(instance.typeId), defs, plots, instance,
+                                    prep, townSeed, maxBuildings, searchLog, terrain, bandFilter,
+                                    roadId)) {
+                const int placedHop = roadHop(town, instance.plot.roadId, junctionHops);
+                logTerrainAnchorRoadTry(instance.id, roadId, graphDist, centerDist, "placed_gap",
+                                        "plot_road=" + std::to_string(instance.plot.roadId));
+                Logger::log("layout",
+                            "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
+                                + defs.typeName(instance.typeId) + " roadHop="
+                                + std::to_string(placedHop) + " roadId="
+                                + std::to_string(instance.plot.roadId) + " anchor_road="
+                                + std::to_string(anchorRoadId) + " mode=terrain_anchor prefer="
+                                + terrainLabel(def->terrain.prefer, terrain));
+                return true;
+            }
+        }
+
+        memo.recordFailure(roadId);
+        logTerrainAnchorRoadTry(instance.id, roadId, graphDist, centerDist, "plot_failed",
+                                formatPlacementSearchSummary(searchLog));
+    }
     return false;
 }
 
@@ -179,7 +331,12 @@ void bumpGrowthRings(Town& town) {
                     + " suburban=0-" + std::to_string(town.suburbanMaxHop)
                     + " suburban_dist=" + std::to_string(static_cast<int>(suburbanMaxDist(town)))
                     + " phase=DensifyCore wall_resync=on_zone_change");
-    frontierExtendBands(town, prevSuburbanDist, prevCoreDist);
+    PlacementEvent event;
+    event.type              = PlacementEventType::RingExtended;
+    event.prevSuburbanDist  = prevSuburbanDist;
+    event.prevCoreDist      = prevCoreDist;
+    notifyPlacementFrontier(town, event, nullptr, town.syncTerrainCatalog, &town.syncTerrainProbes,
+                            nullptr);
 }
 
 void clearAlleyStateForRoad(Town& town, int roadId) {
@@ -342,7 +499,7 @@ bool tryPlaceOnSuburbanRoad(Town& town, BuildingInstance& instance, const DefCac
         instance.placementMode == BuildingPlacementMode::SegmentGapFill ? "gap_fill" : "plot_lot";
     Logger::log("layout",
                 "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
-                    + instance.buildingType + " roadHop=" + std::to_string(hops) + " roadDist="
+                    + defs.typeName(instance.typeId) + " roadHop=" + std::to_string(hops) + " roadDist="
                     + std::to_string(static_cast<int>(roadDist)) + " roadId="
                     + std::to_string(roadId) + " suburban_max="
                     + std::to_string(town.suburbanMaxHop) + " urban_core="
@@ -419,7 +576,7 @@ bool tryFillBlockingPendingAlleys(Town& town, BuildingInstance& instance, const 
         const int hops = roadHop(town, alleyRoadId, junctionHops);
         Logger::log("layout",
                     "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
-                        + instance.buildingType + " roadHop=" + std::to_string(hops)
+                        + defs.typeName(instance.typeId) + " roadHop=" + std::to_string(hops)
                         + " roadId=" + std::to_string(alleyRoadId) + " mode=pending_alley_fill");
     } else {
         recordAlleyFillFailure(town, pendingIndex, failLimit);
@@ -468,7 +625,7 @@ bool tryPlaceInUrbanCore(Town& town, BuildingInstance& instance, const DefCache&
     if (!placed) {
         const std::vector<int> coreRoads = collectCoreRoadIds(town);
         for (int roadId : coreRoads) {
-            if (skipRoadForPlacement(town, defs, instance.buildingType, roadId, junctionHops)) {
+            if (skipRoadForPlacement(town, defs, defs.typeName(instance.typeId), roadId, junctionHops)) {
                 continue;
             }
             resetPlacementSearchLog(searchLog);
@@ -495,7 +652,7 @@ bool tryPlaceInUrbanCore(Town& town, BuildingInstance& instance, const DefCache&
         const int hops = roadHop(town, roadId, junctionHops);
         Logger::log("layout",
                     "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
-                        + instance.buildingType + " roadHop=" + std::to_string(hops)
+                        + defs.typeName(instance.typeId) + " roadHop=" + std::to_string(hops)
                         + " suburban_max=" + std::to_string(town.suburbanMaxHop) + " urban_core="
                         + std::to_string(town.urbanCoreMaxHop) + " phase=DensifyCore mode="
                         + (instance.placementMode == BuildingPlacementMode::SegmentGapFill
@@ -522,7 +679,7 @@ bool tryPlaceSuburbanOnRoads(Town& town, BuildingInstance& instance, const DefCa
 
     const BandFilter suburbanFilter = BandFilter::suburban(town);
     resetPlacementSearchLog(searchLog);
-    if (!tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance, prep, townSeed,
+    if (!tryPlaceRoadPlot(town, defs.typeName(instance.typeId), defs, plots, instance, prep, townSeed,
                           maxBuildings, searchLog, terrain, suburbanFilter, -1)) {
         const std::string summary = searchLog.resultSummary.empty()
                                         ? "placement_failed"
@@ -545,7 +702,7 @@ bool tryPlaceSuburbanOnRoads(Town& town, BuildingInstance& instance, const DefCa
         instance.placementMode == BuildingPlacementMode::SegmentGapFill ? "gap_fill" : "plot_lot";
     Logger::log("layout",
                 "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
-                    + instance.buildingType + " roadHop=" + std::to_string(hops) + " roadDist="
+                    + defs.typeName(instance.typeId) + " roadHop=" + std::to_string(hops) + " roadDist="
                     + std::to_string(static_cast<int>(roadDist)) + " roadId="
                     + std::to_string(logRoadId) + " suburban_max="
                     + std::to_string(town.suburbanMaxHop) + " urban_core="
@@ -559,18 +716,73 @@ bool tryPlaceRuralOnRoads(Town& town, BuildingInstance& instance, const DefCache
                           PlacementSearchLog& searchLog, const TerrainAtlas* terrain,
                           const std::vector<int>& junctionHops, const PlacementPrep& prep,
                           RoadAttemptMemo& memo) {
-    (void)memo;
+    const BuildingDef* def = defs.building(instance.typeId);
+    if (def == nullptr) {
+        return false;
+    }
+
+    const BandFilter ruralFilter = BandFilter::rural(town);
+    const std::string typeName   = defs.typeName(instance.typeId);
+
+    if (def->terrain.placement == TerrainPlacementMode::Border && terrain != nullptr
+        && terrain->valid) {
+        if (tryPlaceBorderPlot(town, instance, defs, plots, prep, townSeed, *terrain, ruralFilter,
+                               nullptr, false)) {
+            return true;
+        }
+        if (def->terrain.requirement == TerrainRequirement::Loose
+            && def->terrain.borderStyle == BorderStyle::Hug
+            && tryPlaceBorderPlot(town, instance, defs, plots, prep, townSeed, *terrain,
+                                  ruralFilter, nullptr, true)) {
+            return true;
+        }
+        return false;
+    }
+
+    resetPlacementSearchLog(searchLog);
+
+    if (buildingHasTerrainPlacement(defs, instance.typeId) && terrain != nullptr
+        && terrain->valid) {
+        Logger::log("layout",
+                    "ring_rural_list: queueIndex=" + std::to_string(instance.id) + " suburban_max="
+                        + std::to_string(town.suburbanMaxHop) + " mode=terrain_scan");
+        if (tryPlaceRoadPlot(town, typeName, defs, plots, instance, prep, townSeed, maxBuildings,
+                             searchLog, terrain, ruralFilter, -1,
+                             RoadPlotSearchMode::TerrainScan)) {
+            const int placedHop = roadHop(town, instance.plot.roadId, junctionHops);
+            recordTerrainAnchorRoad(town, def->terrain.prefer, instance.plot.roadId, instance.id,
+                                    "terrain_scan");
+            Logger::log("layout",
+                        "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
+                            + typeName + " roadHop=" + std::to_string(placedHop) + " mode=terrain_scan");
+            return true;
+        }
+        logTerrainScanFrontierHead(instance.id, def->terrain.prefer, town, ruralFilter,
+                                   suburbanMaxDist(town), def->terrain.proximityMaxDist, 25,
+                                   town.syncTerrainCatalog);
+        logTerrainTraceFailed({static_cast<int>(instance.id), "terrain_scan"}, "scan_exhausted",
+                              formatPlacementSearchSummary(searchLog));
+    }
+
+    if (isTerrainRequirementStrict(*def)) {
+        Logger::log("layout",
+                    "terrain_strict_fail: queueIndex=" + std::to_string(instance.id) + " type="
+                        + typeName);
+        return false;
+    }
+
+    if (tryPlaceNearTerrainAnchor(town, instance, defs, plots, townSeed, maxBuildings, searchLog,
+                                  terrain, ruralFilter, junctionHops, prep, memo)) {
+        return true;
+    }
 
     Logger::log("layout",
                 "ring_rural_list: queueIndex=" + std::to_string(instance.id) + " suburban_max="
-                    + std::to_string(town.suburbanMaxHop) + " suburban_dist="
-                    + std::to_string(static_cast<int>(suburbanMaxDist(town)))
-                    + " mode=frontier");
-
-    const BandFilter ruralFilter = BandFilter::rural(town);
+                    + std::to_string(town.suburbanMaxHop) + " mode=frontier_loose_fallback");
     resetPlacementSearchLog(searchLog);
-    if (!tryPlaceRoadPlot(town, instance.buildingType, defs, plots, instance, prep, townSeed,
-                          maxBuildings, searchLog, terrain, ruralFilter, -1)) {
+    if (!tryPlaceRoadPlot(town, typeName, defs, plots, instance, prep, townSeed, maxBuildings,
+                          searchLog, terrain, ruralFilter, -1,
+                          RoadPlotSearchMode::FrontierLooseFallback)) {
         const std::string summary = searchLog.resultSummary.empty()
                                         ? "placement_failed"
                                         : searchLog.resultSummary;
@@ -581,14 +793,80 @@ bool tryPlaceRuralOnRoads(Town& town, BuildingInstance& instance, const DefCache
     }
 
     const int placedHop = roadHop(town, instance.plot.roadId, junctionHops);
-    const float placedDist = roadMidpointCenterDist(
-        town, town.roads[static_cast<std::size_t>(instance.plot.roadId)]);
     Logger::log("layout",
-                "ring_place: queueIndex=" + std::to_string(instance.id) + " type="
-                    + instance.buildingType + " roadHop=" + std::to_string(placedHop)
-                    + " roadDist=" + std::to_string(static_cast<int>(placedDist))
-                    + " suburban_max=" + std::to_string(town.suburbanMaxHop) + " mode=rural");
+                "ring_place: queueIndex=" + std::to_string(instance.id) + " type=" + typeName
+                    + " roadHop=" + std::to_string(placedHop) + " mode=frontier_loose_fallback");
     return true;
+}
+
+bool tryPlaceAnyOnRoads(Town& town, BuildingInstance& instance, const DefCache& defs,
+                        const PlotConfig& plots, int townSeed, int maxBuildings,
+                        PlacementSearchLog& searchLog, const TerrainAtlas* terrain,
+                        const std::vector<int>& junctionHops, const PlacementPrep& prep,
+                        RoadAttemptMemo& memo) {
+    (void)memo;
+    (void)junctionHops;
+
+    const BuildingDef* def = defs.building(instance.typeId);
+    if (def == nullptr || terrain == nullptr || !terrain->valid) {
+        return false;
+    }
+
+    const std::string typeName = defs.typeName(instance.typeId);
+    const BandFilter  anyBand  = BandFilter::none();
+    TerrainPlacementTrace trace{};
+
+    if (def->terrain.placement == TerrainPlacementMode::Border) {
+        if (tryPlaceBorderPlot(town, instance, defs, plots, prep, townSeed, *terrain, anyBand,
+                               &trace, false)) {
+            Logger::log("layout",
+                        "any_place: queueIndex=" + std::to_string(instance.id) + " type="
+                            + typeName + " mode=border");
+            return true;
+        }
+        if (def->terrain.requirement == TerrainRequirement::Loose
+            && def->terrain.borderStyle == BorderStyle::Hug
+            && tryPlaceBorderPlot(town, instance, defs, plots, prep, townSeed, *terrain, anyBand,
+                                  &trace, true)) {
+            Logger::log("layout",
+                        "any_place: queueIndex=" + std::to_string(instance.id) + " type="
+                            + typeName + " mode=border_band");
+            return true;
+        }
+        Logger::log("layout",
+                    "border_fail: queueIndex=" + std::to_string(instance.id) + " type=" + typeName
+                        + " reason=no_outline_slot");
+        return false;
+    }
+
+    resetPlacementSearchLog(searchLog);
+    if (buildingHasTerrainPlacement(defs, instance.typeId)) {
+        if (tryPlaceRoadPlot(town, typeName, defs, plots, instance, prep, townSeed, maxBuildings,
+                             searchLog, terrain, anyBand, -1, RoadPlotSearchMode::TerrainScan)) {
+            Logger::log("layout",
+                        "any_place: queueIndex=" + std::to_string(instance.id) + " type="
+                            + typeName + " mode=terrain_scan");
+            return true;
+        }
+    }
+
+    if (isTerrainRequirementStrict(*def)) {
+        Logger::log("layout",
+                    "terrain_strict_fail: queueIndex=" + std::to_string(instance.id) + " type="
+                        + typeName);
+        return false;
+    }
+
+    resetPlacementSearchLog(searchLog);
+    if (tryPlaceRoadPlot(town, typeName, defs, plots, instance, prep, townSeed, maxBuildings,
+                         searchLog, terrain, anyBand, -1,
+                         RoadPlotSearchMode::FrontierLooseFallback)) {
+        Logger::log("layout",
+                    "any_place: queueIndex=" + std::to_string(instance.id) + " type=" + typeName
+                        + " mode=frontier_loose_fallback");
+        return true;
+    }
+    return false;
 }
 
 void rebuildHopDebugRoadMesh(Town& town, const std::vector<int>& junctionHops, float pixelsPerUnit) {

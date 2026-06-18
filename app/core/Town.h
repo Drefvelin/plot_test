@@ -2,6 +2,7 @@
 
 #include <SFML/Graphics.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -9,7 +10,12 @@
 #include <unordered_set>
 #include <vector>
 
-#include "PlacementFrontier.h"
+#include "FrontierManager.h"
+
+#include "BuildingTypes.h"
+#include "Terrain.h"
+#include "TerrainCatalog.h"
+#include "Vec2.h"
 
 enum class RingPhase {
     Normal,
@@ -18,34 +24,11 @@ enum class RingPhase {
 
 struct TerrainAtlas;
 
-struct Vec2 {
-    float x = 0.f;
-    float y = 0.f;
-
-    Vec2 operator+(const Vec2& o) const { return {x + o.x, y + o.y}; }
-    Vec2 operator-(const Vec2& o) const { return {x - o.x, y - o.y}; }
-    Vec2 operator*(float s) const { return {x * s, y * s}; }
-
-    float dot(const Vec2& o) const { return x * o.x + y * o.y; }
-    float length() const { return std::sqrt(x * x + y * y); }
-
-    Vec2 normalized() const {
-        const float len = length();
-        if (len < 1e-6f) {
-            return {};
-        }
-        return {x / len, y / len};
-    }
-};
-
-inline Vec2 perpendicular(const Vec2& v) { return {-v.y, v.x}; }
-
 // Available frontage span on one side of a road.
 struct RoadFrontageSegment {
-    int   id         = -1;
-    float startT     = 0.f;
-    float endT       = 0.f;
-    float centerDist = 0.f;
+    int   id     = -1;
+    float startT = 0.f;
+    float endT   = 0.f;
 
     float width() const { return endT - startT; }
 };
@@ -185,6 +168,8 @@ struct Plot {
     float frontage     = 0.f;
     float depth        = 0.f;
     float area         = 0.f;
+    Vec2  outlineTangent{};
+    Vec2  outlineInward{};
 };
 
 // One building footprint inside a plot (axis-aligned or rotated rectangle).
@@ -202,17 +187,20 @@ struct BuildingFootprint {
     bool        tmplEdgePlacement = false;
     bool        tmplMiddlePlacement = false;
     bool        tmplCornerPlacement = false;
+    bool        tmplBackEdgePlacement = false;
 };
 
 enum class BuildingPlacementMode {
     PlotLot,
     SegmentGapFill,
+    BorderPlot,
+    BorderBuilding,
 };
 
 // One spawned building tied to a plot; removed when the growth slider moves down.
 struct BuildingInstance {
-    int                   id = -1;  // index in the growth queue
-    std::string           buildingType;
+    std::uint32_t         id = 0;
+    BuildingTypeId        typeId = kInvalidBuildingTypeId;
     BuildingPlacementMode placementMode = BuildingPlacementMode::PlotLot;
     int                   roadId = -1;
     int                   roadBank = -1;  // 0/1 for secondary road banks
@@ -256,6 +244,14 @@ struct FrontageSegmentLabel {
     float centerYPx = 0.f;
 };
 
+// Rotated text label (diagram pixels); used for terrain plot verification.
+struct RotatedTextLabel {
+    std::string text;
+    float       centerXPx   = 0.f;
+    float       centerYPx   = 0.f;
+    float       rotationDeg = 0.f;
+};
+
 struct Town {
     std::vector<Road> roads;
     std::vector<Junction> junctions;
@@ -276,6 +272,9 @@ struct Town {
     int               placementBumpCount     = 0;   // bumps consumed for current index (persists across syncs)
     int               placementFailureCount = 0;  // skipped slots in [0, active target)
     std::vector<int>  placementFailedIndices;     // queue indices that failed to place
+    int               moveFailureCount      = 0;  // movable buildings that could not relocate
+    std::uint32_t     relocatingInstanceId  = 0xFFFFFFFFu;  // overlap skip during relocation trial
+    int               relocatingHostRoadId  = -1;           // exclude old road during relocation trial
     std::string       placementSkipReasonsSummary;
     int               suburbanMaxHop = 2;
     int               urbanCoreMaxHop = -1;
@@ -286,7 +285,13 @@ struct Town {
     float             syncMinPlotFrontage   = 0.f;
     float             syncMinGapWidth       = 0.f;
     float             syncMinAlleyGapWidth  = 0.f;
+    float             syncBorderOutlineProbeMaxDist = 20.f;
+    float             syncBorderSampleStep          = 3.f;
+    int               syncBorderMaxAttempts         = 32;
+    float             syncPixelsPerUnit             = 10.f;
     float             syncFrontageSetback   = 2.f;
+    const TerrainCatalog* syncTerrainCatalog = nullptr;
+    TerrainProbeConfig    syncTerrainProbes{};
     std::vector<std::vector<AlleyProbeLine>> alleyProbesByQueueIndex;
     std::unordered_set<WallGapKey, WallGapKeyHash, WallGapKeyEqual> checkedAlleyGaps;
     std::vector<PendingAlleyFill>    pendingAlleyFills;
@@ -295,8 +300,10 @@ struct Town {
     sf::VertexArray   hopDebugRoadMesh{sf::Triangles};
     sf::VertexArray   hopDebugJunctionMesh{sf::Triangles};
     sf::VertexArray   buildingOutlineMesh{sf::Triangles};
+    sf::VertexArray   terrainBuildingOutlineMesh{sf::Triangles};
     std::vector<FrontageSegmentLabel> plotLabels;
     std::vector<FrontageSegmentLabel> buildingLabels;
+    std::vector<RotatedTextLabel>     terrainPlotTypeLabels;
     std::vector<FrontageSegmentLabel> roadLabels;
     std::vector<FrontageSegmentLabel> frontageSegmentLabels;
     std::vector<FrontageSegmentLabel> roadEndProbeLabels;
@@ -315,7 +322,9 @@ struct Town {
     std::uint64_t             cachedSecondaryRecordsFingerprint = 0;
     bool                      frontageInitialized = false;
     int                       alleyProbesCapacity   = 0;
-    PlacementFrontier         frontiers;
+    int                       frontierNotifySuppressDepth = 0;
+    FrontierManager           frontierManager;
+    std::unordered_map<TerrainId, int> lastTerrainAnchorRoadId;
 };
 
 struct PlacementFloors;
@@ -326,12 +335,17 @@ struct SecondaryRoadRecord;
 void ensurePlacementSyncMins(Town& town, const PlacementFloors& floors, const TownConfig& townCfg,
                              float frontageSetback);
 void ensureTownFrontageInitialized(Town& town, float setback, const PlacementFloors& floors,
-                                     const TownConfig& townCfg);
+                                   const TownConfig& townCfg, const TerrainAtlas* terrain = nullptr,
+                                   const PlotConfig* plots = nullptr,
+                                   const TerrainCatalog* catalog = nullptr,
+                                   const TerrainProbeConfig* probes = nullptr);
 void restoreBankFrontageFromInstances(Town& town, int roadId, int bankIndex, float frontageSetback);
 void restoreRoadFrontageFromInstances(Town& town, int roadId, float frontageSetback);
 void restoreBankWallFromInstances(Town& town, int roadId, int bankIndex, float frontageSetback);
 void restoreRoadWallFromInstances(Town& town, int roadId, float frontageSetback);
-void removeBuildingInstance(Town& town, int instanceId, float frontageSetback);
+void removeBuildingInstance(Town& town, int instanceId, float frontageSetback,
+                            const TerrainAtlas* terrain = nullptr,
+                            const PlotConfig* plots     = nullptr);
 void applySecondaryRoadRecord(Town& town, const SecondaryRoadRecord& rec,
                               const TerrainAtlas* terrain = nullptr);
 
@@ -348,11 +362,13 @@ void removeSecondaryRoadAtQueueIndex(Town& town, int queueIndex);
 void buildRoadEndProbeMesh(Town& town, float pixelsPerUnit, float probeLengthUnits = 2.f);
 void resetRoadFrontageSegments(Town& town, float frontageSetback, bool resetSegmentIds = false);
 void resetWallSegments(Town& town, float frontageSetback, bool resetSegmentIds = false);
-void carveRoadFrontageForPlot(Town& town, const Plot& plot, float frontageSetback);
+void carveRoadFrontageForPlot(Town& town, const Plot& plot, float frontageSetback,
+                              const TerrainAtlas* terrain = nullptr, bool notifyFrontier = false);
 void carveRoadFrontageForFootprint(Town& town, int roadId, int bankIndex,
                                    const BuildingFootprint& mainFootprint);
 void carveRoadWallForFootprint(Town& town, int roadId, int bankIndex,
-                               const BuildingFootprint& mainFootprint);
+                               const BuildingFootprint& mainFootprint,
+                               const TerrainAtlas* terrain = nullptr, bool notifyFrontier = false);
 bool pointInsideTownDisc(const Town& town, const Vec2& p);
 bool roadFrameForBank(const Road& road, int bankIndex, Vec2& origin, Vec2& farEnd, Vec2& edgeDir);
 void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,

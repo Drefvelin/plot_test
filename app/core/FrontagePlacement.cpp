@@ -10,6 +10,8 @@
 #include "PlacementFrontier.h"
 #include "Profile.h"
 #include "TerrainAtlas.h"
+#include "TerrainPlacement.h"
+#include "TerrainScanFrontier.h"
 
 #include <algorithm>
 #include <cmath>
@@ -145,7 +147,7 @@ SegmentPlacementResult trySegmentPositions(Town& town, const FrontageSlot& slot,
                                 result.lastDepthCap, dims.frontage, dims.area, t);
                 continue;
             }
-            if (overlapsInstances(candidate, town.buildingInstances)) {
+            if (overlapsInstances(candidate, town.buildingInstances, town.relocatingInstanceId)) {
                 result.failReason = "overlap";
                 logSegmentProbe(buildingId, slot, result.failReason, DimReject::None, -1.f,
                                 dims.frontage, dims.area, t);
@@ -207,7 +209,7 @@ void collectFrontageSlots(const Town& town, const DefCache& defs,
                 slot.bankIndex  = bankIndex;
                 slot.startT     = segment.startT;
                 slot.endT       = segment.endT;
-                slot.centerDist = segment.centerDist;
+                slot.centerDist = roadCenterDist(town, road.id);
                 slot.zoneScore  = scoreSegmentForZone(town, slot, zone, townGrowth);
                 out.push_back(slot);
             }
@@ -230,9 +232,11 @@ void collectFrontageSlots(const Town& town, const DefCache& defs,
 bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCache& defs,
                       const PlotConfig& plots, BuildingInstance& out, const PlacementPrep& prep,
                       int townSeed, int maxBuildings, PlacementSearchLog& searchLog,
-                      const TerrainAtlas* terrain, const BandFilter& bandFilter, int roadFilter) {
+                      const TerrainAtlas* terrain, const BandFilter& bandFilter, int roadFilter,
+                      RoadPlotSearchMode searchMode) {
     PROFILE_SCOPE(ProfileScopeId::PlacePlot);
     const PlotOrientation orientOrder[2] = {prep.orientFirst, prep.orientSecond};
+    const BuildingDef*    buildingDef    = defs.building(buildingType);
 
     searchLog.buildingId   = out.id;
     searchLog.buildingType = buildingType;
@@ -263,17 +267,31 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
     while (true) {
         FrontageSlot slot{};
         if (useFrontier) {
-            FrontierRef ref;
-            if (!peekClosestPlotRef(town, frontierBands, minPlotWidth, skippedSegments, ref)) {
-                break;
-            }
-            if (!fillFrontageSlotFromRef(town, ref, false, slot)) {
+            if (searchMode == RoadPlotSearchMode::TerrainScan) {
+                if (buildingDef == nullptr || terrain == nullptr || !terrain->valid) {
+                    break;
+                }
+                TerrainScanSlotRef scanRef{};
+                float              scanScore = 0.f;
+                if (!peekNextTerrainScanSlot(town, *buildingDef, *terrain, bandFilter,
+                                             skippedSegments, scanRef, slot, scanScore)) {
+                    break;
+                }
+                skippedSegments.insert(scanRef.base.segmentId);
+            } else {
+                FrontierRef ref;
+                if (!peekClosestPlotRef(town, frontierBands, minPlotWidth, skippedSegments,
+                                        ref)) {
+                    break;
+                }
+                if (!fillFrontageSlotFromRef(town, ref, false, slot)) {
+                    skippedSegments.insert(ref.segmentId);
+                    continue;
+                }
                 skippedSegments.insert(ref.segmentId);
-                continue;
+                const char* zone = zoneTypeForBuilding(defs, buildingType);
+                slot.zoneScore   = scoreSegmentForZone(town, slot, zone, prep.townGrowth);
             }
-            skippedSegments.insert(ref.segmentId);
-            const char* zone = zoneTypeForBuilding(defs, buildingType);
-            slot.zoneScore   = scoreSegmentForZone(town, slot, zone, prep.townGrowth);
         } else {
             if (collectedIndex >= collectedSlots.size()) {
                 break;
@@ -282,6 +300,9 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
         }
 
         if (slot.roadId < 0 || slot.roadId >= static_cast<int>(town.roads.size())) {
+            continue;
+        }
+        if (town.relocatingHostRoadId >= 0 && slot.roadId == town.relocatingHostRoadId) {
             continue;
         }
 
@@ -344,13 +365,27 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
             continue;
         }
 
+        if (searchMode == RoadPlotSearchMode::TerrainScan && buildingDef != nullptr && terrain != nullptr
+            && terrain->valid) {
+            const TerrainPlacementMode mode = effectiveTerrainMode(*buildingDef, *terrain);
+            if (mode == TerrainPlacementMode::Inside
+                && !plotMeetsInsideMin(attempt.plot, *terrain, buildingDef->terrain.prefer)) {
+                ++searchLog.dimFailedSegments;
+                continue;
+            }
+            if (!segmentWithinProximityMax(town, slot, *buildingDef, *terrain)) {
+                ++searchLog.dimFailedSegments;
+                continue;
+            }
+        }
+
         if (logProbes) {
             logSegmentProbe(out.id, slot, "placed", DimReject::None, attempt.dims.depth,
                             attempt.dims.frontage, attempt.dims.area, attempt.slotT);
         }
 
         out.id            = attempt.plot.id;
-        out.buildingType  = buildingType;
+        out.typeId        = defs.typeIdFor(buildingType);
         out.placementMode = BuildingPlacementMode::PlotLot;
         out.roadId        = slot.roadId;
         out.roadBank      = slot.bankIndex;
@@ -408,7 +443,8 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
         searchLog.layoutRequested = static_cast<int>(prep.buildingSpecs.size());
         searchLog.layoutPlaced  = static_cast<int>(out.footprints.size());
 
-        carveRoadFrontageForPlot(town, attempt.plot, plots.frontageSetback);
+        carveRoadFrontageForPlot(town, attempt.plot, plots.frontageSetback, terrain,
+                                 terrain != nullptr);
         for (const BuildingFootprint& footprint : out.footprints) {
             if (footprint.mainBuilding) {
                 carveRoadWallForFootprint(town, slot.roadId, slot.bankIndex, footprint);

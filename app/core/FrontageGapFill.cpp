@@ -148,13 +148,16 @@ bool trySegmentMainAtT(const Town& town, const Vec2& origin, const Vec2& edgeDir
         return false;
     }
 
-    const Vec2 roadStart  = origin + edgeDir * t;
-    const Vec2 frontLeft  = roadStart + inward * setback;
-    const Vec2 frontRight = frontLeft + edgeDir * frontage;
-    const Vec2 backRight  = frontRight + inward * depth;
-    const Vec2 backLeft   = frontLeft + inward * depth;
+    const Vec2 u = edgeDir.normalized();
+    Vec2       v = perpendicular(u);
+    if (v.dot(inward) < 0.f) {
+        v = v * -1.f;
+    }
 
-    setFootprintCorners(out, frontLeft, frontRight, backRight, backLeft);
+    const Vec2 roadStart   = origin + edgeDir * t;
+    const Vec2 rectOrigin  = roadStart + v * setback;
+    setFootprintCorners(out, rectOrigin, rectOrigin + u * frontage,
+                        rectOrigin + u * frontage + v * depth, rectOrigin + v * depth);
     if (!footprintPlacementValid(out, town, terrain, setback, excludeAlleyRoadId)) {
         return false;
     }
@@ -383,7 +386,7 @@ void collectMainWallGapSlots(Town& town, const DefCache& defs,
                 slot.bankIndex  = bankIndex;
                 slot.startT     = segment.startT;
                 slot.endT       = segment.endT;
-                slot.centerDist = segment.centerDist;
+                slot.centerDist = roadCenterDist(town, road.id);
                 slot.zoneScore  = scoreSegmentForZone(town, slot, zone, townGrowth);
                 slot.isWallGap  = true;
                 appendUniqueGapSlot(out, slot);

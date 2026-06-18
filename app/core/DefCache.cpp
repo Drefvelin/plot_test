@@ -2,6 +2,7 @@
 
 #include "Config.h"
 
+#include <algorithm>
 #include <yaml-cpp/yaml.h>
 
 #include <iostream>
@@ -21,6 +22,97 @@ std::array<uint8_t, 3> readRgb(const YAML::Node& node, const std::array<uint8_t,
         return {node[0].as<uint8_t>(), node[1].as<uint8_t>(), node[2].as<uint8_t>()};
     }
     return fallback;
+}
+
+TerrainPlacementMode parseTerrainPlacement(const std::string& s) {
+    if (s == "inside") {
+        return TerrainPlacementMode::Inside;
+    }
+    if (s == "proximity") {
+        return TerrainPlacementMode::Proximity;
+    }
+    if (s == "border") {
+        return TerrainPlacementMode::Border;
+    }
+    return TerrainPlacementMode::None;
+}
+
+TerrainRequirement parseTerrainRequirement(const std::string& s) {
+    if (s == "strict") {
+        return TerrainRequirement::Strict;
+    }
+    return TerrainRequirement::Loose;
+}
+
+BorderStyle parseBorderStyle(const std::string& s) {
+    if (s == "hug") {
+        return BorderStyle::Hug;
+    }
+    return BorderStyle::Band;
+}
+
+void appendPreferKind(const TerrainCatalog& catalog, std::vector<TerrainId>& out, TerrainId kind) {
+    if (kind == kTerrainUnknown) {
+        return;
+    }
+    catalog.appendPreferId(out, kind);
+}
+
+void parsePreferToken(const TerrainCatalog& catalog, const std::string& token,
+                      std::vector<TerrainId>& out) {
+    const std::vector<TerrainId> expanded = catalog.expandPreferToken(token);
+    for (TerrainId id : expanded) {
+        appendPreferKind(catalog, out, id);
+    }
+}
+
+void parsePreferNode(const TerrainCatalog& catalog, const YAML::Node& node,
+                     std::vector<TerrainId>& out) {
+    if (!node) {
+        return;
+    }
+    if (node.IsSequence()) {
+        for (const YAML::Node& item : node) {
+            parsePreferToken(catalog, item.as<std::string>(), out);
+        }
+        return;
+    }
+    parsePreferToken(catalog, node.as<std::string>(), out);
+}
+
+BuildingTerrainRules parseBuildingTerrain(const TerrainCatalog& catalog, const YAML::Node& node) {
+    BuildingTerrainRules rules;
+    if (!node || !node.IsMap()) {
+        return rules;
+    }
+    if (node["prefer"]) {
+        parsePreferNode(catalog, node["prefer"], rules.preferKinds);
+        if (!rules.preferKinds.empty()) {
+            rules.prefer = rules.preferKinds.front();
+        }
+    }
+    if (node["placement"]) {
+        rules.placement = parseTerrainPlacement(node["placement"].as<std::string>());
+    }
+    if (node["requirement"]) {
+        rules.requirement = parseTerrainRequirement(node["requirement"].as<std::string>());
+    }
+    if (node["proximity_max_dist"]) {
+        rules.proximityMaxDist = node["proximity_max_dist"].as<float>();
+    }
+    if (node["border_min_dist"]) {
+        rules.borderMinDist = node["border_min_dist"].as<float>();
+    }
+    if (node["border_max_dist"]) {
+        rules.borderMaxDist = node["border_max_dist"].as<float>();
+    }
+    if (node["border_style"]) {
+        rules.borderStyle = parseBorderStyle(node["border_style"].as<std::string>());
+    }
+    if (node["border_overhang_dist"]) {
+        rules.borderOverhangDist = node["border_overhang_dist"].as<float>();
+    }
+    return rules;
 }
 
 CountRange parseCountRange(const YAML::Node& node) {
@@ -118,6 +210,8 @@ BuildingTemplateRules parseTemplateRules(const YAML::Node& node) {
             rules.middlePlacement = true;
         } else if (name == "corner_placement") {
             rules.cornerPlacement = true;
+        } else if (name == "back_edge_placement") {
+            rules.backEdgePlacement = true;
         } else if (name == "diagonal_allowed") {
             rules.diagonalAllowed = true;
         }
@@ -167,8 +261,10 @@ void finalizeBuildingDef(BuildingDef& def, const std::unordered_map<std::string,
 
 }  // namespace
 
-DefCache DefCache::load(const std::filesystem::path& path) {
-    return DefCache(path);
+DefCache DefCache::load(const std::filesystem::path& path, const TerrainCatalog& catalog) {
+    DefCache cache(path, catalog);
+    cache.terrainProbes_ = buildTerrainProbeConfig(catalog, cache);
+    return cache;
 }
 
 std::filesystem::path DefCache::resolveBuildingsPath() {
@@ -189,7 +285,7 @@ std::filesystem::path DefCache::resolveBuildingsPath() {
     return projectRoot / "app" / "config" / "buildings.yml";
 }
 
-DefCache::DefCache(const std::filesystem::path& path) {
+DefCache::DefCache(const std::filesystem::path& path, const TerrainCatalog& catalog) {
     YAML::Node root;
     try {
         root = YAML::LoadFile(path.string());
@@ -243,6 +339,12 @@ DefCache::DefCache(const std::filesystem::path& path) {
                 if (node["allow_plot_fill"]) {
                     def.allowPlotFill = node["allow_plot_fill"].as<bool>();
                 }
+                if (node["movable"]) {
+                    def.movable = node["movable"].as<bool>();
+                }
+                if (node["terrain"]) {
+                    def.terrain = parseBuildingTerrain(catalog, node["terrain"]);
+                }
                 def.rgb = readRgb(node["rgb"], def.rgb);
                 loadBuildingsOnPlot(node["buildings"], def);
             }
@@ -251,6 +353,58 @@ DefCache::DefCache(const std::filesystem::path& path) {
             buildings_[id] = def;
         }
     }
+    assignTypeIds();
+}
+
+TerrainProbeConfig buildTerrainProbeConfig(const TerrainCatalog& catalog, const DefCache& defs) {
+    TerrainProbeConfig probe{};
+    std::vector<TerrainId> border;
+    std::vector<TerrainId> scan;
+
+    for (const auto& [_, def] : defs.buildings()) {
+        const TerrainPlacementMode mode = def.terrain.placement;
+        if (mode == TerrainPlacementMode::None || def.terrain.preferKinds.empty()) {
+            continue;
+        }
+        for (TerrainId id : def.terrain.preferKinds) {
+            if (mode == TerrainPlacementMode::Border) {
+                catalog.appendPreferId(border, id);
+            } else {
+                catalog.appendPreferId(scan, id);
+            }
+        }
+    }
+    std::vector<TerrainId> scanInside;
+    for (const auto& [_, def] : defs.buildings()) {
+        if (def.terrain.placement != TerrainPlacementMode::Inside) {
+            continue;
+        }
+        for (TerrainId id : def.terrain.preferKinds) {
+            catalog.appendPreferId(scanInside, id);
+        }
+    }
+
+    probe.borderIds      = std::move(border);
+    probe.scanIds        = std::move(scan);
+    probe.scanInsideIds  = std::move(scanInside);
+
+    float maxLongSide = 0.f;
+    for (const auto& [_, def] : defs.buildings()) {
+        if (def.terrain.placement != TerrainPlacementMode::Border) {
+            continue;
+        }
+        for (const auto& [category, _] : def.buildingsOnPlot) {
+            const SizeBand* band = defs.buildingSizeBand(category);
+            if (band != nullptr) {
+                const float side = std::sqrt(band->maxArea * 2.f);
+                maxLongSide      = std::max(maxLongSide, side);
+            }
+        }
+    }
+    if (maxLongSide > 1e-3f) {
+        probe.minBorderFrontage = std::max(6.f, maxLongSide);
+    }
+    return probe;
 }
 
 const SizeBand* DefCache::buildingSizeBand(const std::string& category) const {
@@ -289,6 +443,41 @@ const BuildingDef* DefCache::building(const std::string& buildingType) const {
     return &it->second;
 }
 
+void DefCache::assignTypeIds() {
+    typeNames_.clear();
+    std::vector<std::string> sorted;
+    sorted.reserve(buildings_.size());
+    for (const auto& [name, _] : buildings_) {
+        sorted.push_back(name);
+    }
+    std::sort(sorted.begin(), sorted.end());
+    typeNames_.resize(sorted.size());
+    for (BuildingTypeId i = 0; i < static_cast<BuildingTypeId>(sorted.size()); ++i) {
+        typeNames_[i] = sorted[static_cast<std::size_t>(i)];
+        buildings_[sorted[static_cast<std::size_t>(i)]].typeId = i;
+    }
+}
+
+BuildingTypeId DefCache::typeIdFor(const std::string& buildingType) const {
+    const BuildingDef* def = building(buildingType);
+    return def != nullptr ? def->typeId : kInvalidBuildingTypeId;
+}
+
+const std::string& DefCache::typeName(BuildingTypeId typeId) const {
+    static const std::string kEmpty;
+    if (typeId >= typeNames_.size()) {
+        return kEmpty;
+    }
+    return typeNames_[typeId];
+}
+
+const BuildingDef* DefCache::building(BuildingTypeId typeId) const {
+    if (typeId >= typeNames_.size()) {
+        return nullptr;
+    }
+    return building(typeNames_[typeId]);
+}
+
 const std::string* DefCache::buildingCategory(const std::string& buildingType) const {
     const BuildingDef* def = building(buildingType);
     if (!def || def->sizeCategory.empty()) {
@@ -311,6 +500,10 @@ const SizeBand* DefCache::plotSizeBandForBuilding(const std::string& buildingTyp
         }
     }
     return best;
+}
+
+const SizeBand* DefCache::plotSizeBandForBuilding(BuildingTypeId typeId) const {
+    return plotSizeBandForBuilding(typeName(typeId));
 }
 
 const CountRange* DefCache::plotBuildingCount(const std::string& buildingType,

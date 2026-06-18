@@ -1,9 +1,14 @@
 #pragma once
 
+#include "BuildingTypes.h"
+#include "Terrain.h"
+#include "TerrainCatalog.h"
+
 #include <array>
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 struct SizeBand {
     std::string name;
@@ -21,6 +26,35 @@ struct CountRange {
     bool isValid() const { return minCount > 0 && maxCount >= minCount; }
 };
 
+enum class TerrainPlacementMode {
+    None,
+    Inside,
+    Proximity,
+    Border,
+};
+
+enum class TerrainRequirement {
+    Loose,
+    Strict,
+};
+
+enum class BorderStyle {
+    Band,
+    Hug,
+};
+
+struct BuildingTerrainRules {
+    std::vector<TerrainId> preferKinds;
+    TerrainId              prefer            = kTerrainUnknown;
+    TerrainPlacementMode placement         = TerrainPlacementMode::None;
+    TerrainRequirement   requirement        = TerrainRequirement::Loose;
+    BorderStyle          borderStyle       = BorderStyle::Band;
+    float                proximityMaxDist  = 20.f;
+    float                borderMinDist     = 2.f;
+    float                borderMaxDist     = 15.f;
+    float                borderOverhangDist = 0.f;
+};
+
 struct BuildingTemplateRules {
     bool longFacingMiddle = false;
     bool doorLong         = false;
@@ -29,6 +63,7 @@ struct BuildingTemplateRules {
     bool middlePlacement  = false;
     bool cornerPlacement  = false;
     bool diagonalAllowed  = false;
+    bool backEdgePlacement = false;
 };
 
 struct BuildingTemplate {
@@ -44,6 +79,9 @@ struct BuildingDef {
     std::array<uint8_t, 3> rgb = {128, 128, 128};
     bool fillIn        = true;   // may be placed via segment gap-fill in the final growth band
     bool allowPlotFill = true;   // gap-fill may overlap this lot's plot polygon (yard)
+    bool movable       = false;  // relocate when host road band changes and type is incompatible
+    BuildingTypeId typeId = kInvalidBuildingTypeId;
+    BuildingTerrainRules terrain;
 
     // How many buildings of each size category sit on one plot (e.g. small: 1, tiny: 2-3).
     std::unordered_map<std::string, CountRange> buildingsOnPlot;
@@ -52,9 +90,9 @@ struct BuildingDef {
 class DefCache {
 public:
     DefCache() = default;
-    explicit DefCache(const std::filesystem::path& path);
+    DefCache(const std::filesystem::path& path, const TerrainCatalog& catalog);
 
-    static DefCache load(const std::filesystem::path& path);
+    static DefCache load(const std::filesystem::path& path, const TerrainCatalog& catalog);
     static std::filesystem::path resolveBuildingsPath();
 
     const SizeBand* buildingSizeBand(const std::string& category) const;
@@ -65,6 +103,10 @@ public:
     const SizeBand* plotSizeBandForBuilding(const std::string& buildingType) const;
 
     const BuildingDef* building(const std::string& buildingType) const;
+    const BuildingDef* building(BuildingTypeId typeId) const;
+    BuildingTypeId       typeIdFor(const std::string& buildingType) const;
+    const std::string&   typeName(BuildingTypeId typeId) const;
+    const SizeBand*      plotSizeBandForBuilding(BuildingTypeId typeId) const;
     const std::string* buildingCategory(const std::string& buildingType) const;
 
     // Backward-compatible aliases (plot lot bands).
@@ -89,9 +131,15 @@ public:
 
     const std::unordered_map<std::string, BuildingDef>& buildings() const { return buildings_; }
 
+    const TerrainProbeConfig& terrainProbes() const { return terrainProbes_; }
+
 private:
     std::unordered_map<std::string, SizeBand>         buildingSizes_;
     std::unordered_map<std::string, BuildingTemplate> buildingTemplates_;
     std::unordered_map<std::string, SizeBand>         plotSizes_;
     std::unordered_map<std::string, BuildingDef> buildings_;
+    std::vector<std::string>                     typeNames_;
+    TerrainProbeConfig                           terrainProbes_;
+
+    void assignTypeIds();
 };

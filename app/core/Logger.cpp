@@ -122,3 +122,7 @@ void Logger::shutdown() {
     }
     streams_.clear();
 }
+
+const std::filesystem::path& Logger::directory() {
+    return logDirectory_;
+}

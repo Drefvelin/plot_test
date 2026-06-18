@@ -1,17 +1,45 @@
 #pragma once
 
+#include "FrontierManager.h"
 #include "Town.h"
 
 #include <vector>
 
 class DefCache;
+struct SizeBand;
 struct TerrainAtlas;
 struct TownConfig;
+struct BuildingTerrainRules;
 
 bool polygonBuildable(const Vec2 corners[4], const TerrainAtlas& terrain, float edgeStep = 0.5f);
+bool polygonEdgesCrossRoads(const Vec2 corners[4], const Town& town, int hostRoadId);
 bool pointInPolygon(const Vec2& p, const std::vector<Vec2>& polygon);
 void buildRoadPlot(const Vec2& roadStart, const Vec2& edgeDir, const Vec2& inward, float setback,
                    float frontage, float depth, Plot& plot);
+bool buildBorderHugPlot(const Vec2& roadStart, const Vec2& edgeDir, const Vec2& bankInward,
+                        const Vec2& plotInward, float frontageSetback, float frontage,
+                        TerrainId prefer, const TerrainAtlas& terrain, const SizeBand& plotBand,
+                        Plot& out);
+
+bool polygonBuildableHugPlot(const Vec2 corners[4], const TerrainAtlas& terrain,
+                             TerrainId prefer);
+bool isHugTrapezoidPlot(const Plot& plot);
+void hugPlotLayoutFrame(const Plot& plot, Vec2& axisU, Vec2& axisV);
+bool footprintHasRightAngles(const BuildingFootprint& footprint);
+bool outlineRectFitsInPlot(const Plot& plot, float minFront, float minDepth);
+void extendMainFootprintOverhang(std::vector<BuildingFootprint>& footprints, const Plot& plot,
+                                 const Vec2& featureInward, float maxOverhang);
+bool footprintOverlapsInstances(const BuildingFootprint& footprint,
+                                const std::vector<BuildingInstance>& instances);
+bool footprintWithinTownAndRoads(const BuildingFootprint& footprint, const Town& town,
+                                 int hostRoadId);
+bool footprintPlacementValidWithOverhang(const BuildingFootprint& footprint, const Plot& plot,
+                                         const Town& town, const TerrainAtlas* terrain,
+                                         float setback, int hostRoadId, TerrainId prefer,
+                                         float maxOverhang);
+bool footprintPlacementValidBorderHug(const BuildingFootprint& footprint, const Plot& plot,
+                                        const Town& town, const TerrainAtlas& terrain, float setback,
+                                        int hostRoadId, TerrainId prefer, float maxOverhang);
 Vec2 plotCenter(const Plot& plot);
 float maxPlotDepthToRoadHit(const Vec2& roadStart, const Vec2& edgeDir, float frontage,
                             const Vec2& inward, float setback, int hostRoadId, int bankIndex,
@@ -19,13 +47,16 @@ float maxPlotDepthToRoadHit(const Vec2& roadStart, const Vec2& edgeDir, float fr
 void invalidateRoadTopologyCaches(Town& town);
 bool plotPlacementValid(const Plot& plot, const Town& town, const TerrainAtlas* terrain,
                         float setback, int hostRoadId);
+bool plotPlacementValid(const Plot& plot, const Town& town, const TerrainAtlas* terrain,
+                        float setback, int hostRoadId, const BuildingTerrainRules* borderRules);
 bool plotsOverlap(const Plot& a, const Plot& b);
 bool bankHasBuildingOnSide(const Town& town, int roadId, int bankIndex);
 bool footprintsOverlap(const BuildingFootprint& a, const BuildingFootprint& b);
 bool footprintPlacementValid(const BuildingFootprint& footprint, const Town& town,
                              const TerrainAtlas* terrain, float setback, int hostRoadId);
 Vec2 instancePlacementPoint(const BuildingInstance& instance);
-bool overlapsInstances(const Plot& plot, const std::vector<BuildingInstance>& instances);
+bool overlapsInstances(const Plot& plot, const std::vector<BuildingInstance>& instances,
+                       std::uint32_t skipInstanceId = 0xFFFFFFFFu);
 bool footprintOverlapsMains(const BuildingFootprint& footprint, const Town& town,
                             const DefCache& defs);
 bool footprintOverlapsMainsOnBank(const BuildingFootprint& footprint, const Town& town,

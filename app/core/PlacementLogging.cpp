@@ -269,21 +269,22 @@ void logSegmentInventory(const Town& town) {
                                 + std::to_string(frontageCount) + " wall=" + std::to_string(wallCount)
                                 + " ===");
     for (const Road& road : town.roads) {
+        const float roadDist = roadCenterDist(town, road.id);
         for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
             const RoadSideFrontage* side = road.sideBank(bankIndex);
             for (const RoadFrontageSegment& segment : side->segments) {
                 Logger::log("segments", "segment seg=" + std::to_string(segment.id) + " road="
                                             + std::to_string(road.id) + " bank="
                                             + std::to_string(bankIndex) + " width="
-                                            + fmt1(segment.width()) + " center_dist="
-                                            + fmt1(segment.centerDist));
+                                            + fmt1(segment.width()) + " road_dist="
+                                            + fmt1(roadDist));
             }
             for (const RoadFrontageSegment& segment : side->wallSegments) {
                 Logger::log("segments", "wall seg=" + std::to_string(segment.id) + " road="
                                             + std::to_string(road.id) + " bank="
                                             + std::to_string(bankIndex) + " width="
-                                            + fmt1(segment.width()) + " center_dist="
-                                            + fmt1(segment.centerDist));
+                                            + fmt1(segment.width()) + " road_dist="
+                                            + fmt1(roadDist));
             }
         }
     }

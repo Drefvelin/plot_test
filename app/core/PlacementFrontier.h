@@ -53,6 +53,7 @@ struct PlacementFrontier {
 };
 
 FrontierBand      classifyFrontierBand(float centerDist, const Town& town);
+FrontierBand      roadFrontierBand(const Town& town, int roadId);
 FrontierBandSet   frontierBandsFromDistFilter(const Town& town, float minDistInclusive,
                                               float maxDistInclusive, bool filterEnabled);
 

@@ -8,7 +8,7 @@ Architecture and roadmap docs: [`plans/README.md`](plans/README.md). **Building 
 
 **10 pixels = 1 world unit** (`world.pixels_per_unit: 10` in `app/config/config.yml`).
 
-- All simulation geometry (Voronoi sites, roads, plots, frontage, terrain) is stored in **world units**.
+- All simulation geometry (Voronoi sites, roads, plots, frontage, terrain) is stored in **world units** as `Vec2` / `float`.
 - Rendering multiplies by `pixels_per_unit` to get screen/diagram pixels.
 - Example: a 1024×1024 unit diagram renders at 10240×10240 pixels.
 
@@ -39,7 +39,7 @@ Infrastructure libraries (SFML rendering, yaml-cpp config, etc.) are fine. The r
 | `RoadSideFrontage` | One bank of a road. Bank 0 is left of `a→b`; bank 1 is right. Holds `segments` (plot frontage) and `wallSegments` (free wall gaps for alleys/gap-fill). `exhausted` holds per-bank skip flags (`PlotDone`, `AlleyDone`, `GapDone`). |
 | `Junction` | Road endpoint where roads meet; `pos` + `roadIds[]` |
 | `Plot` | Road-facing lot created only on placement: `corners[0]`–`[1]` along frontage, `[2]`–`[3]` inward |
-| `BuildingInstance` | Spawned building: `buildingType` + assigned `Plot`; lives in `Town.buildingInstances` |
+| `BuildingInstance` | Spawned building: `typeId` (DefCache id), `id` (uint32 queue index), assigned `Plot`; lives in `Town.buildingInstances` |
 
 Build pipeline:
 
@@ -52,6 +52,7 @@ Build pipeline:
 - `diagram.width/height/radius` — world units
 - `world.pixels_per_unit` — px per unit (default 10)
 - `plots.min_area` / `plots.max_area` — plot area bounds in square units
+- `plots.terrain_anchor_max_roads` — BFS road cap for rural `terrain_anchor` fallback per `TerrainKind` (default 4)
 - `voronoi.scale` / `voronoi.seed` — site density and RNG seed
 
 ## Definition cache
@@ -62,14 +63,14 @@ Build pipeline:
 buildings:
   house:
     size: small
-    type: residential   # urban | residential | rural
+    type: residential   # urban | residential | rural | any
     fill_in: true        # permission for core gap-fill only; all buildings use plots — see plans/placement-model.md
     rgb: [220, 180, 140]
   church:
     size: huge
     type: urban
     rgb: [160, 160, 210]
-  # farm, resource, workshop ...
+  # farm, lumber_camp, mine, fisher_hut, watermill, workshop ...
 
 sizes:
   small:
@@ -97,27 +98,34 @@ Loaded at startup into [`DefCache`](app/core/DefCache.h):
 - **Gap-fill / alley records** — `removeSecondaryRecordsBlockedByMainFootprint` on successful gap-fill place only (`SecondaryRoadPlacement.cpp`); not every sync
 - **Auto-grow** — CLI `--auto-grow [N]` raises target by **one building per step** (`--auto-grow-ms` interval from config, default 50 ms). Optional `--auto-exit` quits after target is reached and placed (exit code = failure count). Config `growth:` keys; bare `--auto-grow` defaults to **200** (or `town.yml` total if higher). **G** toggles in-app auto-grow to max.
 - **Growth sync** — each `BuildingPlacer::sync` handles **at most one** queue index (one building request). Slider jumps catch up one building per frame, not in a batch drain.
-- **Placement frontiers** — bootstrap once at town build; incremental bank refresh on carve; `frontierExtendBands` on ring bump with `restoreRoadWallFromInstances` when a road's zone band changes; full `restoreRoadFrontageFromInstances` on demolish; `removeBuildingInstance` for demolish (one-bank restore)
-- **Profiling** — `--profile` or `growth.profile: true` enables scoped timing (`Profile.h`); summary on `--auto-exit`. Child scopes under `PlacerSync` / `PlaceGapFill` / `MeshRebuild` break down the hot path (nested scopes overlap in totals).
+- **Movable buildings** — `movable: true` in `buildings.yml` (farm, lumber_camp, mine, fisher_hut, watermill). On ring bump, zone-incompatible movables try a new rural/suburban slot first; old instance removed only on success. Failures increment `moveFailureCount` (HUD: **Move failures**). Find-first flow in `MovableRelocation.cpp`.
+- **Placement frontiers** — all frontier state on `Town.frontierManager`: hop-band plot/wall/alley (Core/Suburban/Rural), terrain-scan (plains/forest/hills), **border** frontage buckets per `TerrainId` (plot segments whose inward ray reaches a terrain outline **before** crossing another road — source road excluded; sorted by **road midpoint** distance). Zone/band is **not** stored on segments — O(1) `roadCenterDist(town, roadId)` / `roadFrontierBand(town, roadId)` from `town.roads[roadId]`. **`notifyPlacementFrontier`** is the single sync entry point — fan-out on carve (`PlotCarved`), topology rebuild, demolish (`InstanceRemoved`), ring bump. Bootstrap via `notify(FullRebuild)` at town build. Border placement peeks border buckets (`peekNextBorderSlot`); **plot required** on frontage then main building (band/hug); up to `border_max_attempts` retries. Success logs `border_attempt_ok mode=border_plot`. No road/building overlap; water spill OK.
+- **Profiling** — `--profile` or `growth.profile: true` enables scoped timing (`Profile.h`); summary on `--auto-exit`. Child scopes under `PlacerSync` / `PlaceGapFill` / `MeshRebuild` break down the hot path (nested scopes overlap in totals). Terrain/border child scopes: `TerrainBorderPlace`, `TerrainScanPeek`, `TerrainScanTrySlot`.
+- **Memory report** — on exit (before teardown), writes simulation-data breakdown to `logs/memory.md` (capacity-based; excludes terrain image rasters, render caches, and debug-only alley probe history). See `MemoryReport.cpp`.
 - **Junction hop cache** — `Town` caches junction BFS hops and per-road hop values (`getJunctionHops`, `getRoadHop` in `FrontageZones.cpp`); invalidated on `indexJunctions` / road topology changes. Collectors take cached hops instead of recomputing per placement attempt.
 - **Per-bank road exhaustion** — updated on carve (`refreshBankExhaustionAfterCarve`); bootstrap once. Not rescanned every sync.
 - **Placement perf caches** — [`PlacementPrep`](app/core/PlacementPrep.h) hoists per-index setup. [`RoadAttemptMemo`](app/core/PlacementPrep.h) skips roads that already failed plot+gap for the current queue index. Per-bank lazy depth memo on `RoadSideFrontage` (`maxPlotDepthToRoadHit`). Per-bank `mainOccupancyT` merged t-spans for gap-fill clip (rebuilt on carve/bootstrap). `Town.secondaryRoadIds` for fast alley overlap. `Town::roadTopologyGeneration` + `invalidateRoadTopologyCaches()` clears depth + occupancy caches on topology change.
-- `Hud` — screen-fixed bar at top; drag to set 0…max buildings; shows `{placed} placed / {target} target` and **Failures: N** under the slider (red when N > 0, green when 0). **T** / terrain toggle cycles overlay modes including **hop**. **G** toggles auto-grow.
+- `Hud` — screen-fixed bar at top; drag to set 0…max buildings; shows `{placed} placed / {target} target` and **Failures: N** under the slider (red when N > 0, green when 0). **T** cycles terrain overlay modes; **Z** zone hop tint; **P** / **Biome plots** shows terrain-tagged building plot outlines plus rotated labels (`type`, `placement/prefer` e.g. `farm` / `prox/plains`); **G** toggles auto-grow.
 
 Alleys are secondary roads. They are created from primary road wall gaps on **developed banks only** (at least one building on that road+bank, plot or gap-fill). Probes run in nearest-gap order with **seeded shuffle** of gap positions and angle fan (`townSeed`); the probe ray starts inset from the wall gap for clearance, but the **placed alley** starts at the gap point on the host road centerline. Straight probes stop at the first non-source road (pass through existing alleys); on any straight failure the same `(gapT, angle)` tries a **depth stub** to `maxPlotDepthToRoadHit`, then scans a **180° turn fan** (≥19 directions, seeded shuffle). All ray hits are scored; a fully validated road-to-road turn wins, otherwise the best partial hit is used (so turns can be 30°, 45°, etc., not only 90°). Dead-end stub if no turn hit. Rejects include main-building corridor hits and alleys too parallel to another on the same bank (`min_alley_bank_angle_sep_deg`). Junctions on crossed roads via `splitRoadsAtAlleyEndpoints` (host at `alley.a`, dest at `alley.b`).
 
 ## Terrain placement
 
-- Baked [`TerrainAtlas`](app/core/TerrainAtlas.h): `isBuildable()` uses dilated forbidden raster (sea, river, etc.).
+- Baked [`TerrainAtlas`](app/core/TerrainAtlas.h): `isBuildable()` uses dilated forbidden raster (sea, river, etc.). **`majorityLandKind`** is the dominant non-water biome per map; minority kinds get smoothed **outline polylines** (same trace path as river/shore). `distToRegionEdge(p, kind)` / `hasRegionOutline(kind)` for edge distance; debug **T** draws forest (green) and hills (gray-brown) outlines when non-majority.
+- **Terrain modes** on `BuildingDef.terrain` (`inside` / `proximity` / `border`; `requirement: loose | strict`; `border_style: band | hug`; **`prefer` scalar or list** e.g. `prefer: [sea, river]` or `water`): terrain-first uses `TerrainScanFrontier` peek ([`FrontagePlacement.cpp`](app/core/FrontagePlacement.cpp) `RoadPlotSearchMode::TerrainScan`); loose types fall back to vanilla frontier on their band scope; `watermill` is strict. Border placer [`BorderPlacement.cpp`](app/core/BorderPlacement.cpp) peeks [`BorderFrontier`](app/core/BorderFrontier.cpp) buckets — **plot required** on frontage, then main (band/hug); road/building overlap rejected, water spill OK. Loose types retry band style after hug fails. Rural band: `farm`, `lumber_camp`, `mine`. **`type: any`**: `fisher_hut`, `watermill`.
+- **Terrain bake:** nearest RGB classify in [`TerrainColors.cpp`](app/core/TerrainColors.cpp); `terrain.river_inset` (default = `shore_inset`) for land-side `riverOutlines`; bake log `border_frontier: sea_slots=… river_slots=…`.
+- All building footprints must have four 90° corners (`footprintHasRightAngles`); building orientation is independent of skewed plot or outline edges — layouts use orthogonal rectangles (road-perpendicular or rotated), never parallelograms warped to plot sides.
 - Plot and footprint candidates must pass `polygonBuildable()` (all corners + edge samples buildable).
 - `assignRoadSideInwards(town, terrain)` sets bank `inward` only on the buildable side of each road; zero inward skips frontage on water-facing banks.
-- Rejection logs: `terrain_forbidden` (`probe.log`), `terrain_reject` (`layout.log`).
+- Rejection logs: `terrain_forbidden` (`probe.log`), `terrain_reject` (`layout.log`). **Terrain-first trace:** `logs/terrain_place.log` — grep `queueIndex=N` for phase, slot tries, and final `event=placed` (path, corners, terrain scores).
 
 ```
 app/core/
   Town.h / Town.cpp       — data structures; junctions, frontage segments (our geometry only)
   TownBuilder.*           — jc_voronoi → Town (library confined here)
-  PlacementFrontier.cpp   — distance-bucketed frontiers; incremental refresh
+  FrontierManager.cpp     — unified frontier storage + notify fan-out (plot/wall/alley/terrain-scan/border)
+  BorderFrontier.cpp      — border bucket rebuild + peek (frontage segment → outline ray; reject if another road blocks)
+  PlacementFrontier.cpp   — peek/consume APIs; internal rebuild/refresh (called only from notify)
   Town.cpp                — ensureTownFrontageInitialized, applySecondaryRoadRecord, removeBuildingInstance
   BuildingPlacer.*        — plot/building placement from Town data
   App.*                   — window + render loop

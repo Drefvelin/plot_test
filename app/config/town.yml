@@ -13,10 +13,16 @@ min_alley_endpoint_spacing: 20.0     # min distance between alley starts/ends on
 min_alley_side_road_dist: 5.0        # spawn inset from wall gap + min perpendicular road clearance on each alley side
 alley_side_road_sample_count: 5      # interior samples along alley for side-road clearance
 alley_fill_fail_limit: 5             # consecutive failed fill attempts before alley is abandoned
+border_outline_probe_max_dist: 30.0   # deprecated; no longer gates border frontier (kept for compat)
+border_outline_sample_step: 3.0       # debug overlay step when drawing outline graphs
+border_max_attempts: 32              # border placement retries per queue index before fail
 
 buildings:
-  house: 585
-  church: 5
-  workshop: 360
-  resource: 15
+  house: 85
+  church: 2
+  workshop: 60
+  lumber_camp: 8
+  mine: 7
+  fisher_hut: 4
+  watermill: 3
   farm: 25

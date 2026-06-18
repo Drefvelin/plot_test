@@ -5,6 +5,7 @@
 #include "PlacementFloors.h"
 #include "Profile.h"
 #include "TerrainAtlas.h"
+#include "TerrainCatalog.h"
 #include "TownConfig.h"
 
 #include <algorithm>
@@ -81,8 +82,13 @@ int main(int argc, char* argv[]) {
     Logger::init(config, projectRoot);
     Logger::log("app", "config loaded from " + configPath.string());
 
+    const auto terrainCatalogPath = configPath.parent_path() / "terrains.yml";
+    const TerrainCatalog terrainCatalog = TerrainCatalog::load(terrainCatalogPath);
+    Logger::log("app", "terrain catalog loaded from " + terrainCatalogPath.string() + " types="
+                           + std::to_string(terrainCatalog.count()));
+
     const auto buildingsPath = DefCache::resolveBuildingsPath();
-    const DefCache defs = DefCache::load(buildingsPath);
+    const DefCache defs = DefCache::load(buildingsPath, terrainCatalog);
     Logger::log("app", "buildings loaded from " + buildingsPath.string() + " types="
                            + std::to_string(defs.buildings().size()) + " plot_bands="
                            + std::to_string(defs.plotSizes().size()) + " building_bands="
@@ -105,12 +111,13 @@ int main(int argc, char* argv[]) {
                         + (growthAuto.autoExit ? "yes" : "no"));
     }
 
-    TerrainAtlas terrainAtlas = bakeTerrain(config, projectRoot);
+    TerrainAtlas terrainAtlas = bakeTerrain(config, terrainCatalog, projectRoot);
 
     const PlacementFloors placementFloors =
         PlacementFloors::fromDefs(defs, config.plots.maxDepthToFrontRatio);
 
-    App app(config, townConfig, defs, std::move(terrainAtlas), placementFloors, growthAuto);
+    App app(config, townConfig, terrainCatalog, defs, std::move(terrainAtlas), placementFloors,
+            growthAuto);
     const int code = app.run();
 
     Logger::shutdown();

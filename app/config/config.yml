@@ -16,6 +16,7 @@ plots:
   max_area: 200         # square units (maximum plot area)
   max_depth_to_front_ratio: 1.5   # neither side may exceed 1.5x the other
   frontage_setback: 2.0           # front row sits this many units back from the road
+  terrain_anchor_max_roads: 8     # BFS cap for terrain_anchor fallback (per prefer kind)
 
 voronoi:
   scale: 0.4
@@ -31,6 +32,7 @@ terrain:
   simplify_tolerance: 20.0
   water_inset: 2.0
   shore_inset: 2.0
+  river_inset: 2.0   # land-side bank outline for border frontier (mirrors shore_inset)
   contour_width: 1.0
   clip_roads_at_water: true
   corridor_roads_enabled: true
@@ -75,6 +77,8 @@ logging:
       filename: points.log
     - channel: terrain
       filename: terrain.log
+    - channel: terrain_place
+      filename: terrain_place.log
     - channel: profile
       filename: profile.log
 

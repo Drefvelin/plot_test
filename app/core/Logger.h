@@ -15,6 +15,7 @@ public:
     static void log(const std::string& channel, const std::string& message);
     static void flush();
     static void shutdown();
+    static const std::filesystem::path& directory();
 
 private:
     static std::string timestamp();

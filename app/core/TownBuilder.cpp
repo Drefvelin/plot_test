@@ -244,15 +244,20 @@ int syncBoundaryRoadsFromDiagram(Town& town, const jcv_diagram& diagram, float r
 }  // namespace
 
 Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain,
-                        const PlacementFloors& floors, const TownConfig& townCfg) {
+                        const PlacementFloors& floors, const TownConfig& townCfg,
+                        const TerrainCatalog* catalog, const TerrainProbeConfig* probes) {
     PROFILE_SCOPE(ProfileScopeId::TownBuild);
 
     Town town;
+    town.lastTerrainAnchorRoadId.clear();
     town.placementQueueCursor = 0;
     town.placementBumpIndex   = -1;
     town.placementBumpCount   = 0;
     town.placementFailureCount = 0;
     town.placementFailedIndices.clear();
+    town.moveFailureCount     = 0;
+    town.relocatingInstanceId = 0xFFFFFFFFu;
+    town.relocatingHostRoadId = -1;
     town.suburbanMaxHop = std::max(0, townCfg.initialSuburbanMaxHops);
     town.urbanCoreMaxHop = -1;
     town.ringPhase = RingPhase::Normal;
@@ -366,7 +371,8 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain,
                                 + std::to_string(roadsAfterSplit) + " primary_roads="
                                 + std::to_string(town.primaryRoadCount) + " boundary_source=roads");
 
-    ensureTownFrontageInitialized(town, config.plots.frontageSetback, floors, townCfg);
+    ensureTownFrontageInitialized(town, config.plots.frontageSetback, floors, townCfg, terrain,
+                                  &config.plots, catalog, probes);
 
     return town;
 }

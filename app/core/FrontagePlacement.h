@@ -12,6 +12,12 @@
 
 struct TerrainAtlas;
 
+enum class RoadPlotSearchMode {
+    Frontier,
+    TerrainScan,
+    FrontierLooseFallback,
+};
+
 struct FrontageSlot {
     int   segmentId  = -1;
     int   roadId     = -1;
@@ -25,6 +31,8 @@ struct FrontageSlot {
     float width() const { return endT - startT; }
 };
 
+bool segmentMidpoint(const Town& town, const FrontageSlot& slot, Vec2& out);
+
 void collectFrontageSlots(const Town& town, const DefCache& defs, const std::string& buildingType,
                           float townGrowth, std::vector<FrontageSlot>& out,
                           const BandFilter& bandFilter, int roadFilter,
@@ -37,4 +45,5 @@ bool tryPlaceRoadPlot(Town& town, const std::string& buildingType, const DefCach
                       const PlotConfig& plots, BuildingInstance& out, const PlacementPrep& prep,
                       int townSeed, int maxBuildings, PlacementSearchLog& searchLog,
                       const TerrainAtlas* terrain = nullptr,
-                      const BandFilter& bandFilter = BandFilter::none(), int roadFilter = -1);
+                      const BandFilter& bandFilter = BandFilter::none(), int roadFilter = -1,
+                      RoadPlotSearchMode searchMode = RoadPlotSearchMode::Frontier);

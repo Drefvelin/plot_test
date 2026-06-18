@@ -6,6 +6,7 @@
 
 #include "DefCache.h"
 #include "TerrainAtlas.h"
+#include "TerrainPlacement.h"
 #include "TownConfig.h"
 
 #include <algorithm>
@@ -14,6 +15,17 @@
 #include <unordered_set>
 
 namespace {
+
+constexpr float kDepthCacheTStep   = 0.05f;
+constexpr float kDepthCacheDimStep = 0.1f;
+
+float quantizeDepthCacheT(float value) {
+    return std::round(value / kDepthCacheTStep) * kDepthCacheTStep;
+}
+
+float quantizeDepthCacheDim(float value) {
+    return std::round(value / kDepthCacheDimStep) * kDepthCacheDimStep;
+}
 
 bool edgeHasNonBuildableSample(const Vec2& a, const Vec2& b, const TerrainAtlas& terrain,
                                float step) {
@@ -61,23 +73,6 @@ bool axisSeparates(const Vec2 a[4], const Vec2 b[4], const Vec2& axis) {
     projectPolygon(a, axis, minA, maxA);
     projectPolygon(b, axis, minB, maxB);
     return maxA <= minB || maxB <= minA;
-}
-
-
-bool polygonEdgesCrossRoads(const Vec2 corners[4], const Town& town, int hostRoadId) {
-    for (const Road& road : town.roads) {
-        if (road.id == hostRoadId) {
-            continue;
-        }
-        for (int i = 0; i < 4; ++i) {
-            const Vec2& a = corners[i];
-            const Vec2& b = corners[(i + 1) % 4];
-            if (segmentsCrossInInterior(a, b, road.a, road.b, 0.03f)) {
-                return true;
-            }
-        }
-    }
-    return false;
 }
 
 bool polygonBuildableImpl(const Vec2 corners[4], const TerrainAtlas& terrain, float edgeStep) {
@@ -185,6 +180,242 @@ void buildRoadPlot(const Vec2& roadStart, const Vec2& edgeDir, const Vec2& inwar
     plot.corners[1] = plot.corners[0] + edgeDir * frontage;
     plot.corners[2] = plot.corners[1] + inward * depth;
     plot.corners[3] = plot.corners[0] + inward * depth;
+    plot.outlineTangent = {};
+    plot.outlineInward  = {};
+}
+
+float quadAreaFromCorners(const Vec2 corners[4]) {
+    const Vec2 ab = corners[1] - corners[0];
+    const Vec2 ac = corners[2] - corners[0];
+    const Vec2 ad = corners[3] - corners[0];
+    return 0.5f * (std::abs(ab.x * ac.y - ab.y * ac.x) + std::abs(ab.x * ad.y - ab.y * ad.x));
+}
+
+bool buildBorderHugPlot(const Vec2& roadStart, const Vec2& edgeDir, const Vec2& bankInward,
+                        const Vec2& plotInward, float frontageSetback, float frontage,
+                        TerrainId prefer, const TerrainAtlas& terrain, const SizeBand& plotBand,
+                        Plot& plot) {
+    if (!terrain.valid || frontage < 1e-3f) {
+        return false;
+    }
+    const Vec2 edge     = edgeDir.normalized();
+    const Vec2 bankIn   = bankInward.normalized();
+    const Vec2 plotIn   = plotInward.normalized();
+    plot.corners[0]     = roadStart + bankIn * frontageSetback;
+    plot.corners[1]     = plot.corners[0] + edge * frontage;
+
+    if (!projectToPreferOutline(plot.corners[0], plotIn, prefer, terrain, 250.f, plot.corners[3])) {
+        return false;
+    }
+    if (!projectToPreferOutline(plot.corners[1], plotIn, prefer, terrain, 250.f, plot.corners[2])) {
+        return false;
+    }
+
+    plot.frontage = frontage;
+    const float depthA = (plot.corners[3] - plot.corners[0]).dot(plotIn);
+    const float depthB = (plot.corners[2] - plot.corners[1]).dot(plotIn);
+    plot.depth         = (depthA + depthB) * 0.5f;
+    plot.area          = quadAreaFromCorners(plot.corners);
+    if (plot.area + 1e-3f < plotBand.minArea || plot.area > plotBand.maxArea + 1e-3f) {
+        return false;
+    }
+
+    const Vec2 backMid  = (plot.corners[2] + plot.corners[3]) * 0.5f;
+    const Vec2 frontMid = (plot.corners[0] + plot.corners[1]) * 0.5f;
+    OutlineSnap snap{};
+    if (snapToPreferOutline(backMid, prefer, terrain, frontMid, snap)) {
+        plot.outlineTangent = snap.tangent;
+        plot.outlineInward  = snap.featureInward;
+    } else {
+        plot.outlineTangent = (plot.corners[2] - plot.corners[3]).normalized();
+        plot.outlineInward  = plotIn;
+    }
+    return plot.depth > frontageSetback + 0.5f;
+}
+
+bool polygonBuildableHugPlot(const Vec2 corners[4], const TerrainAtlas& terrain,
+                             TerrainId prefer) {
+    if (!terrain.valid) {
+        return false;
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (!terrain.isBuildable(corners[i])) {
+            return false;
+        }
+    }
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) % 4;
+        if (i < 2 || i == 3) {
+            if (edgeHasNonBuildableSample(corners[i], corners[j], terrain, 0.5f)) {
+                return false;
+            }
+        }
+    }
+    for (int i = 2; i < 4; ++i) {
+        if (distToPreferEdge(corners[i], prefer, terrain) > kBorderHugEdgeEpsilon + 1e-3f
+            && !terrain.isBuildable(corners[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool isHugTrapezoidPlot(const Plot& plot) {
+    return plot.outlineTangent.length() > 1e-4f;
+}
+
+void hugPlotLayoutFrame(const Plot& plot, Vec2& axisU, Vec2& axisV) {
+    axisU = plot.outlineTangent.normalized();
+    axisV = plot.outlineInward.normalized();
+    if (axisV.length() < 1e-4f) {
+        axisV = (plot.corners[0] - plot.corners[3]).normalized();
+    }
+}
+
+bool footprintHasRightAngles(const BuildingFootprint& footprint) {
+    constexpr float kMaxCos = 0.05f;
+    for (int i = 0; i < 4; ++i) {
+        const Vec2 e0 = footprint.corners[(i + 1) % 4] - footprint.corners[i];
+        const Vec2 e1 = footprint.corners[(i + 2) % 4] - footprint.corners[(i + 1) % 4];
+        if (e0.length() < 1e-4f || e1.length() < 1e-4f) {
+            return false;
+        }
+        if (std::abs(e0.normalized().dot(e1.normalized())) > kMaxCos) {
+            return false;
+        }
+    }
+    return true;
+}
+
+namespace {
+
+void projectPlotOnAxes(const Plot& plot, const Vec2& axisU, const Vec2& axisV, float& minU,
+                       float& maxU, float& minV, float& maxV) {
+    minU = maxU = plot.corners[0].dot(axisU);
+    minV = maxV = plot.corners[0].dot(axisV);
+    for (int i = 1; i < 4; ++i) {
+        const float u = plot.corners[i].dot(axisU);
+        const float v = plot.corners[i].dot(axisV);
+        minU          = std::min(minU, u);
+        maxU          = std::max(maxU, u);
+        minV          = std::min(minV, v);
+        maxV          = std::max(maxV, v);
+    }
+}
+
+}  // namespace
+
+bool outlineRectFitsInPlot(const Plot& plot, float minFront, float minDepth) {
+    if (isHugTrapezoidPlot(plot)) {
+        Vec2 axisU{};
+        Vec2 axisV{};
+        hugPlotLayoutFrame(plot, axisU, axisV);
+        float minU = 0.f;
+        float maxU = 0.f;
+        float minV = 0.f;
+        float maxV = 0.f;
+        projectPlotOnAxes(plot, axisU, axisV, minU, maxU, minV, maxV);
+        return (maxU - minU) + 1e-3f >= minFront && (maxV - minV) + 1e-3f >= minDepth;
+    }
+    return plot.frontage + 1e-3f >= minFront && plot.depth + 1e-3f >= minDepth;
+}
+
+void extendMainFootprintOverhang(std::vector<BuildingFootprint>& footprints, const Plot& plot,
+                                 const Vec2& featureInward, float maxOverhang) {
+    if (maxOverhang < 1e-3f) {
+        return;
+    }
+    const Vec2 push = featureInward.normalized() * maxOverhang;
+    for (BuildingFootprint& footprint : footprints) {
+        if (!footprint.mainBuilding) {
+            continue;
+        }
+        footprint.corners[2] = footprint.corners[2] + push;
+        footprint.corners[3] = footprint.corners[3] + push;
+    }
+}
+
+bool footprintPlacementValidWithOverhang(const BuildingFootprint& footprint, const Plot& plot,
+                                       const Town& town, const TerrainAtlas* terrain, float setback,
+                                       int hostRoadId, TerrainId prefer, float maxOverhang) {
+    if (!footprintHasRightAngles(footprint)) {
+        return false;
+    }
+    if (!cornersValid(footprint.corners, town, terrain)) {
+        return false;
+    }
+    if (polygonEdgesCrossRoads(footprint.corners, town, hostRoadId)) {
+        return false;
+    }
+    if (footprintOverlapsAlleys(footprint, town, setback, hostRoadId)) {
+        return false;
+    }
+    if (terrain == nullptr || !terrain->valid) {
+        return true;
+    }
+    const Vec2 backMid = (plot.corners[2] + plot.corners[3]) * 0.5f;
+    for (int i = 0; i < 4; ++i) {
+        if (terrain->isBuildable(footprint.corners[i])) {
+            continue;
+        }
+        const float edgeDist = distToPreferEdge(footprint.corners[i], prefer, *terrain);
+        if (edgeDist > kBorderHugEdgeEpsilon + maxOverhang + 1e-3f) {
+            return false;
+        }
+        if ((footprint.corners[i] - backMid).length() > maxOverhang + plot.depth * 0.6f) {
+            return false;
+        }
+    }
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) % 4;
+        const Vec2 mid = (footprint.corners[i] + footprint.corners[j]) * 0.5f;
+        if (terrain->isBuildable(mid)) {
+            continue;
+        }
+        if (distToPreferEdge(mid, prefer, *terrain) > kBorderHugEdgeEpsilon + maxOverhang + 1e-3f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool footprintPlacementValidBorderHug(const BuildingFootprint& footprint, const Plot& plot,
+                                      const Town& town, const TerrainAtlas& terrain, float setback,
+                                      int hostRoadId, TerrainId prefer, float maxOverhang) {
+    if (!footprintHasRightAngles(footprint)) {
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (!pointInsideTownDisc(town, footprint.corners[i])) {
+            return false;
+        }
+    }
+    if (polygonEdgesCrossRoads(footprint.corners, town, hostRoadId)) {
+        return false;
+    }
+    if (footprintOverlapsAlleys(footprint, town, setback, hostRoadId)) {
+        return false;
+    }
+    if (!terrain.valid) {
+        return true;
+    }
+    if (!polygonBuildableHugPlot(footprint.corners, terrain, prefer)) {
+        return false;
+    }
+    const Vec2 backMid = (plot.corners[2] + plot.corners[3]) * 0.5f;
+    for (int i = 0; i < 4; ++i) {
+        if (terrain.isBuildable(footprint.corners[i])) {
+            continue;
+        }
+        const float edgeDist = distToPreferEdge(footprint.corners[i], prefer, terrain);
+        if (edgeDist > kBorderHugEdgeEpsilon + maxOverhang + 1e-3f) {
+            return false;
+        }
+        if ((footprint.corners[i] - backMid).length() > maxOverhang + plot.depth * 0.6f) {
+            return false;
+        }
+    }
+    return true;
 }
 
 Vec2 plotCenter(const Plot& plot) {
@@ -281,7 +512,8 @@ float maxPlotDepthToRoadHit(const Vec2& roadStart, const Vec2& edgeDir, float fr
     }
 
     const float tAlong = (roadStart - origin).dot(edgeDirFrame);
-    const DepthCacheKey key{tAlong, frontage, setback};
+    const DepthCacheKey key{quantizeDepthCacheT(tAlong), quantizeDepthCacheDim(frontage),
+                            quantizeDepthCacheDim(setback)};
     const auto          found = side->depthCacheEntries.find(key);
     if (found != side->depthCacheEntries.end()) {
         return found->second;
@@ -327,6 +559,9 @@ bool footprintsOverlap(const BuildingFootprint& a, const BuildingFootprint& b) {
 
 bool footprintPlacementValid(const BuildingFootprint& footprint, const Town& town,
                              const TerrainAtlas* terrain, float setback, int hostRoadId) {
+    if (!footprintHasRightAngles(footprint)) {
+        return false;
+    }
     if (!cornersValid(footprint.corners, town, terrain)) {
         return false;
     }
@@ -347,10 +582,50 @@ bool plotPlacementValid(const Plot& plot, const Town& town, const TerrainAtlas* 
     if (polygonEdgesCrossRoads(plot.corners, town, hostRoadId)) {
         return false;
     }
-    if (overlapsInstances(plot, town.buildingInstances)) {
+    if (overlapsInstances(plot, town.buildingInstances, town.relocatingInstanceId)) {
         return false;
     }
     return !plotOverlapsAlleys(plot, town, setback, hostRoadId);
+}
+
+bool plotPlacementValid(const Plot& plot, const Town& town, const TerrainAtlas* terrain,
+                        float setback, int hostRoadId, const BuildingTerrainRules* borderRules) {
+    for (int i = 0; i < 4; ++i) {
+        if (!pointInsideTownDisc(town, plot.corners[i])) {
+            return false;
+        }
+    }
+    if (terrain != nullptr && terrain->valid) {
+        const bool hugBorder = borderRules != nullptr
+                               && borderRules->placement == TerrainPlacementMode::Border
+                               && borderRules->borderStyle == BorderStyle::Hug;
+        if (hugBorder) {
+            if (!polygonBuildableHugPlot(plot.corners, *terrain, borderRules->prefer)) {
+                return false;
+            }
+        } else if (!polygonBuildableImpl(plot.corners, *terrain, 0.5f)) {
+            return false;
+        }
+    }
+    if (polygonEdgesCrossRoads(plot.corners, town, hostRoadId)) {
+        return false;
+    }
+    if (overlapsInstances(plot, town.buildingInstances, town.relocatingInstanceId)) {
+        return false;
+    }
+    if (plotOverlapsAlleys(plot, town, setback, hostRoadId)) {
+        return false;
+    }
+    if (borderRules == nullptr || terrain == nullptr || !terrain->valid) {
+        return true;
+    }
+    if (borderRules->placement != TerrainPlacementMode::Border) {
+        return true;
+    }
+    if (borderRules->borderStyle == BorderStyle::Hug) {
+        return plotMeetsBorderHug(plot, *borderRules, *terrain);
+    }
+    return plotMeetsBorderBand(plot, *borderRules, *terrain);
 }
 
 Vec2 instancePlacementPoint(const BuildingInstance& instance) {
@@ -365,9 +640,13 @@ Vec2 instancePlacementPoint(const BuildingInstance& instance) {
     return plotCenter(instance.plot);
 }
 
-bool overlapsInstances(const Plot& plot, const std::vector<BuildingInstance>& instances) {
+bool overlapsInstances(const Plot& plot, const std::vector<BuildingInstance>& instances,
+                       std::uint32_t skipInstanceId) {
     const BuildingFootprint plotFootprint = plotAsFootprint(plot);
     for (const BuildingInstance& existing : instances) {
+        if (existing.id == skipInstanceId) {
+            continue;
+        }
         if (existing.placementMode == BuildingPlacementMode::SegmentGapFill) {
             if (!existing.footprints.empty() && footprintsOverlap(plotFootprint, existing.footprints[0])) {
                 return true;
@@ -381,6 +660,41 @@ bool overlapsInstances(const Plot& plot, const std::vector<BuildingInstance>& in
     return false;
 }
 
+bool footprintOverlapsInstances(const BuildingFootprint& footprint,
+                                const std::vector<BuildingInstance>& instances) {
+    Plot probe{};
+    for (int i = 0; i < 4; ++i) {
+        probe.corners[i] = footprint.corners[i];
+    }
+    return overlapsInstances(probe, instances);
+}
+
+bool polygonEdgesCrossRoads(const Vec2 corners[4], const Town& town, int hostRoadId) {
+    for (const Road& road : town.roads) {
+        if (road.id == hostRoadId) {
+            continue;
+        }
+        for (int i = 0; i < 4; ++i) {
+            const Vec2& a = corners[i];
+            const Vec2& b = corners[(i + 1) % 4];
+            if (segmentsCrossInInterior(a, b, road.a, road.b, 0.03f)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool footprintWithinTownAndRoads(const BuildingFootprint& footprint, const Town& town,
+                                 int hostRoadId) {
+    for (int i = 0; i < 4; ++i) {
+        if (!pointInsideTownDisc(town, footprint.corners[i])) {
+            return false;
+        }
+    }
+    return !polygonEdgesCrossRoads(footprint.corners, town, hostRoadId);
+}
+
 bool footprintOverlapsMains(const BuildingFootprint& footprint, const Town& town,
                             const DefCache& defs) {
     Plot probe{};
@@ -389,7 +703,7 @@ bool footprintOverlapsMains(const BuildingFootprint& footprint, const Town& town
     }
     for (const BuildingInstance& instance : town.buildingInstances) {
         if (instance.placementMode == BuildingPlacementMode::PlotLot && instance.plot.id >= 0) {
-            const BuildingDef* def = defs.building(instance.buildingType);
+            const BuildingDef* def = defs.building(defs.typeName(instance.typeId));
             if (def != nullptr && !def->allowPlotFill && plotsOverlap(probe, instance.plot)) {
                 return true;
             }
@@ -463,7 +777,7 @@ bool footprintOverlapsMainsOnBank(const BuildingFootprint& footprint, const Town
             continue;
         }
         if (instance.placementMode == BuildingPlacementMode::PlotLot && instance.plot.id >= 0) {
-            const BuildingDef* def = defs.building(instance.buildingType);
+            const BuildingDef* def = defs.building(defs.typeName(instance.typeId));
             if (def != nullptr && !def->allowPlotFill) {
                 Plot probe{};
                 for (int i = 0; i < 4; ++i) {
@@ -494,7 +808,7 @@ bool footprintOverlapsMainsOnBank(const BuildingFootprint& footprint, const Town
             if (instance.placementMode != BuildingPlacementMode::PlotLot || instance.plot.id < 0) {
                 continue;
             }
-            const BuildingDef* def = defs.building(instance.buildingType);
+            const BuildingDef* def = defs.building(defs.typeName(instance.typeId));
             if (def == nullptr || def->allowPlotFill) {
                 continue;
             }
@@ -835,7 +1149,7 @@ bool alleySegmentBlocked(const Vec2& a, const Vec2& b, float roadHalfWidth, cons
         if (instance.placementMode != BuildingPlacementMode::PlotLot || instance.plot.id < 0) {
             continue;
         }
-        const BuildingDef* def = defs.building(instance.buildingType);
+        const BuildingDef* def = defs.building(defs.typeName(instance.typeId));
         if (def == nullptr || def->allowPlotFill) {
             continue;
         }
@@ -860,7 +1174,7 @@ bool alleySegmentBlockedByMain(const Vec2& a, const Vec2& b, float roadHalfWidth
         if (instance.placementMode != BuildingPlacementMode::PlotLot || instance.plot.id < 0) {
             continue;
         }
-        const BuildingDef* def = defs.building(instance.buildingType);
+        const BuildingDef* def = defs.building(defs.typeName(instance.typeId));
         if (def == nullptr || def->allowPlotFill) {
             continue;
         }
@@ -901,7 +1215,7 @@ void collectAuxiliaryDemolitionsForAlley(const Vec2& a, const Vec2& b, float roa
             if (demolitionAlreadyListed(out, instance.id, footprint.labelId)) {
                 continue;
             }
-            out.push_back({instance.id, footprint.labelId});
+            out.push_back({static_cast<int>(instance.id), footprint.labelId});
         }
     }
 }

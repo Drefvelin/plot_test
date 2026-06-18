@@ -1,6 +1,8 @@
 #include "FrontageZones.h"
 
 #include "FrontagePlacement.h"
+#include "GrowthRings.h"
+#include "PlacementFrontier.h"
 #include "PlotGeometry.h"
 #include "Profile.h"
 
@@ -187,6 +189,13 @@ void rebuildJunctionHopCache(Town& town) {
 float roadMidpointCenterDist(const Town& town, const Road& road) {
     const Vec2 mid = {(road.a.x + road.b.x) * 0.5f, (road.a.y + road.b.y) * 0.5f};
     return (mid - town.center).length();
+}
+
+float roadCenterDist(const Town& town, int roadId) {
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return -1.f;
+    }
+    return roadMidpointCenterDist(town, town.roads[static_cast<std::size_t>(roadId)]);
 }
 
 void invalidateJunctionHopCache(Town& town) {
@@ -384,7 +393,12 @@ std::string formatPlacementBandDistRanges(const Town& town) {
 
 float scoreSegmentForZone(const Town& town, const FrontageSlot& slot, const char* zone,
                           float townGrowth) {
-    if (slot.centerDist + 1e-3f < minCenterDistForZone(zone, townGrowth)) {
+    const float roadDist = roadCenterDist(town, slot.roadId);
+    if (roadDist < 0.f) {
+        return 1e9f;
+    }
+
+    if (roadDist + 1e-3f < minCenterDistForZone(zone, townGrowth)) {
         return 1e9f;
     }
 
@@ -392,7 +406,6 @@ float scoreSegmentForZone(const Town& town, const FrontageSlot& slot, const char
         if (slot.roadId < 0 || slot.roadId >= static_cast<int>(town.roads.size())) {
             return 1e9f;
         }
-        const float roadDist = roadMidpointCenterDist(town, town.roads[static_cast<std::size_t>(slot.roadId)]);
         if (roadDist <= suburbanMaxDist(town) + 1e-3f) {
             return 1e9f;
         }
@@ -408,17 +421,17 @@ float scoreSegmentForZone(const Town& town, const FrontageSlot& slot, const char
             return 1e9f;
         }
 
-        if (slot.centerDist > ruralMaxCenterDist(town, townGrowth) + 1e-3f) {
+        if (roadDist > ruralMaxCenterDist(town, townGrowth) + 1e-3f) {
             return 1e9f;
         }
 
         const float targetDist     = ruralTargetCenterDist(town, townGrowth);
-        const float distFromTarget = std::abs(slot.centerDist - targetDist);
+        const float distFromTarget = std::abs(roadDist - targetDist);
         const int   hops           = getRoadHop(town, slot.roadId);
         return distFromTarget - buildingDist * 0.08f - static_cast<float>(hops) * 2.f;
     }
 
-    return slot.centerDist;
+    return roadDist;
 }
 
 float bandMinFrontage(const DefCache& defs, const std::string& buildingType, float /*segWidth*/,
@@ -428,4 +441,66 @@ float bandMinFrontage(const DefCache& defs, const std::string& buildingType, flo
         return 0.f;
     }
     return std::max(1.f, std::sqrt(band->minArea / maxDepthToFrontRatio));
+}
+
+int instanceHostRoadId(const BuildingInstance& inst) {
+    if (inst.placementMode == BuildingPlacementMode::SegmentGapFill) {
+        return inst.roadId;
+    }
+    if (inst.placementMode == BuildingPlacementMode::BorderBuilding && inst.roadId >= 0) {
+        return inst.roadId;
+    }
+    if (inst.plot.roadId >= 0) {
+        return inst.plot.roadId;
+    }
+    return inst.roadId;
+}
+
+namespace {
+
+FrontierBand classifyBandAt(float centerDist, float suburbanMaxDist, float coreMaxDist,
+                            bool coreEnabled) {
+    constexpr float kDistEps = 1e-3f;
+    if (centerDist > suburbanMaxDist + kDistEps) {
+        return FrontierBand::Rural;
+    }
+    if (coreEnabled && centerDist <= coreMaxDist + kDistEps) {
+        return FrontierBand::Core;
+    }
+    return FrontierBand::Suburban;
+}
+
+}  // namespace
+
+bool roadBandChanged(const Town& town, const Road& road, float prevSuburbanDist,
+                     float prevCoreDist) {
+    const float midDist        = roadMidpointCenterDist(town, road);
+    const bool  prevCoreEnabled = prevCoreDist >= 0.f;
+    const FrontierBand oldBand =
+        classifyBandAt(midDist, prevSuburbanDist, prevCoreDist, prevCoreEnabled);
+    const FrontierBand newBand = classifyFrontierBand(midDist, town);
+    return oldBand != newBand;
+}
+
+bool buildingCompatibleWithRoadBand(const DefCache& defs, const BuildingInstance& inst,
+                                    const Town& town, int roadId) {
+    if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+        return false;
+    }
+    const BuildingDef* def = defs.building(inst.typeId);
+    if (def == nullptr) {
+        return true;
+    }
+    const std::string& typeName = defs.typeName(inst.typeId);
+    const char*        zone     = zoneTypeForBuilding(defs, typeName);
+    if (zone != nullptr && std::strcmp(zone, "any") == 0) {
+        return true;
+    }
+
+    const float dist =
+        roadMidpointCenterDist(town, town.roads[static_cast<std::size_t>(roadId)]);
+    if (zone != nullptr && std::strcmp(zone, "rural") == 0) {
+        return distInFilter(dist, BandFilter::rural(town));
+    }
+    return distInFilter(dist, BandFilter::suburban(town));
 }

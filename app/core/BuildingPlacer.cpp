@@ -7,19 +7,24 @@
 #include "FrontageZones.h"
 #include "GrowthRings.h"
 #include "Logger.h"
+#include "MovableRelocation.h"
 #include "PlacementLogging.h"
 #include "PlacementFrontier.h"
+#include "FrontierManager.h"
 #include "PlotGeometry.h"
 #include "PlacementPrep.h"
 #include "Profile.h"
 #include "RoadExhaustion.h"
 #include "SecondaryRoadPlacement.h"
 #include "TerrainAtlas.h"
+#include "Terrain.h"
+#include "TerrainPlacement.h"
 #include "Units.h"
 
 #include <SFML/Graphics.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -27,6 +32,57 @@
 #include <vector>
 
 namespace {
+
+const char* terrainPlacementModeName(TerrainPlacementMode mode) {
+    switch (mode) {
+    case TerrainPlacementMode::Inside:
+        return "inside";
+    case TerrainPlacementMode::Proximity:
+        return "prox";
+    case TerrainPlacementMode::Border:
+        return "border";
+    default:
+        return "?";
+    }
+}
+
+Vec2 footprintCenter(const BuildingFootprint& footprint) {
+    Vec2 center{};
+    for (const Vec2& corner : footprint.corners) {
+        center = center + corner;
+    }
+    return center * 0.25f;
+}
+
+Vec2 terrainLabelPositionWorld(const BuildingFootprint& footprint) {
+    const Vec2 center = footprintCenter(footprint);
+    if (footprint.doorEdge < 0 || footprint.doorEdge >= 4) {
+        return center;
+    }
+    const int   i        = footprint.doorEdge;
+    const Vec2  doorMid  = (footprint.corners[i] + footprint.corners[(i + 1) % 4]) * 0.5f;
+    const Vec2  toCenter = center - doorMid;
+    const float len      = toCenter.length();
+    if (len < 1e-4f) {
+        return center;
+    }
+    return doorMid + toCenter.normalized() * (len * 0.45f);
+}
+
+float doorParallelRotationDeg(const BuildingFootprint& footprint) {
+    if (footprint.doorEdge < 0 || footprint.doorEdge >= 4) {
+        return 0.f;
+    }
+    const int  i   = footprint.doorEdge;
+    const Vec2 dir = (footprint.corners[(i + 1) % 4] - footprint.corners[i]).normalized();
+    float      deg = std::atan2(dir.y, dir.x) * 180.f / 3.14159265f;
+    if (deg > 90.f) {
+        deg -= 180.f;
+    } else if (deg < -90.f) {
+        deg += 180.f;
+    }
+    return deg;
+}
 
 void appendThickSegment(sf::VertexArray& tris, const Vec2& a, const Vec2& b, float thickness,
                         const sf::Color& color) {
@@ -156,7 +212,8 @@ void rebuildAlleyProbeMesh(Town& town, int queueIndex, float pixelsPerUnit) {
     }
 }
 
-void rebuildFrontageSegmentMesh(Town& town, const PlotConfig& plots, float pixelsPerUnit) {
+void rebuildFrontageSegmentMesh(Town& town, const PlotConfig& plots, float pixelsPerUnit,
+                                const TerrainAtlas* terrain) {
     town.frontageSegmentMesh.clear();
     town.frontageSegmentMesh.setPrimitiveType(sf::Triangles);
     town.frontageInwardArrowMesh.clear();
@@ -202,7 +259,7 @@ void rebuildFrontageSegmentMesh(Town& town, const PlotConfig& plots, float pixel
     };
 
     std::unordered_set<SegmentKey, SegmentKeyHash> alleyFrontierSegments;
-    for (const AlleyFrontierRef& ref : town.frontiers.alley) {
+    for (const AlleyFrontierRef& ref : town.frontierManager.alley) {
         alleyFrontierSegments.insert({ref.roadId, ref.bankIndex, ref.segmentId});
     }
 
@@ -275,6 +332,42 @@ void rebuildFrontageSegmentMesh(Town& town, const PlotConfig& plots, float pixel
             }
         }
     }
+
+    if (terrain != nullptr && terrain->valid && town.syncTerrainCatalog != nullptr) {
+        const sf::Color borderColor(20, 50, 180);
+        const float     outlineStep = std::max(0.5f, town.syncBorderSampleStep * 0.5f);
+        for (TerrainId id : town.syncTerrainProbes.borderIds) {
+            const std::vector<std::vector<Vec2>>* graphs = terrain->outlineGraphs(id);
+            if (graphs == nullptr) {
+                continue;
+            }
+            for (int graphIndex = 0; graphIndex < static_cast<int>(graphs->size()); ++graphIndex) {
+                const std::vector<Vec2>& graph =
+                    (*graphs)[static_cast<std::size_t>(graphIndex)];
+                const float totalLen = polylineGraphLength(graph);
+                if (totalLen < outlineStep) {
+                    continue;
+                }
+                Vec2 prevPx;
+                bool hasPrev = false;
+                for (float arc = 0.f; arc <= totalLen + 1e-3f; arc += outlineStep) {
+                    Vec2 pt;
+                    Vec2 tangent;
+                    if (!samplePolylineGraphAtArc(graph, arc, pt, tangent)) {
+                        continue;
+                    }
+                    const Vec2 px{units::toPixels(pt.x, pixelsPerUnit),
+                                  units::toPixels(pt.y, pixelsPerUnit)};
+                    if (hasPrev) {
+                        appendDottedLine(town.frontageSegmentMesh, prevPx, px, dashPx, gapPx,
+                                         thicknessPx, borderColor);
+                    }
+                    prevPx  = px;
+                    hasPrev = true;
+                }
+            }
+        }
+    }
 }
 
 void rebuildOutlineMesh(Town& town, const DefCache& defs, float pixelsPerUnit, int townSeed) {
@@ -287,36 +380,51 @@ void rebuildOutlineMesh(Town& town, const DefCache& defs, float pixelsPerUnit, i
             continue;
         }
         const std::vector<ResolvedBuildingSpec> specs =
-            resolveBuildingSpecs(defs, instance.buildingType, instance.id, townSeed);
+            resolveBuildingSpecs(defs, defs.typeName(instance.typeId), instance.id, townSeed);
         layoutBuildingsOnPlot(instance.plot, town, specs, instance.id, townSeed, instance.footprints);
     }
 
     town.buildingOutlineMesh.clear();
     town.buildingOutlineMesh.setPrimitiveType(sf::Triangles);
+    town.terrainBuildingOutlineMesh.clear();
+    town.terrainBuildingOutlineMesh.setPrimitiveType(sf::Triangles);
     town.plotLabels.clear();
     town.buildingLabels.clear();
+    town.terrainPlotTypeLabels.clear();
 
     constexpr float kOutlineUnits = 0.35f;
+    const auto appendInstancePlotOutlines = [&](sf::VertexArray& mesh, const BuildingInstance& instance,
+                                                const sf::Color& color) {
+        if (instance.placementMode == BuildingPlacementMode::PlotLot
+            || instance.placementMode == BuildingPlacementMode::BorderPlot) {
+            appendPlotOutline(mesh, instance.plot, pixelsPerUnit, kOutlineUnits, color);
+        } else if (instance.placementMode == BuildingPlacementMode::SegmentGapFill
+                   || instance.placementMode == BuildingPlacementMode::BorderBuilding) {
+            constexpr float kGapFillOutlineUnits = 0.55f;
+            for (const BuildingFootprint& footprint : instance.footprints) {
+                appendFootprintOutline(mesh, footprint, pixelsPerUnit, kGapFillOutlineUnits, color);
+            }
+        }
+    };
+
     for (const BuildingInstance& instance : town.buildingInstances) {
-        const BuildingDef* def = defs.building(instance.buildingType);
+        const BuildingDef* def = defs.building(instance.typeId);
         const sf::Color color =
             def ? sf::Color(def->rgb[0], def->rgb[1], def->rgb[2]) : sf::Color::White;
 
-        if (instance.placementMode == BuildingPlacementMode::PlotLot) {
-            appendPlotOutline(town.buildingOutlineMesh, instance.plot, pixelsPerUnit, kOutlineUnits,
-                              color);
+        appendInstancePlotOutlines(town.buildingOutlineMesh, instance, color);
+        if (buildingHasTerrainPlacement(defs, instance.typeId)) {
+            appendInstancePlotOutlines(town.terrainBuildingOutlineMesh, instance, color);
+        }
 
+        if (instance.placementMode == BuildingPlacementMode::PlotLot
+            || instance.placementMode == BuildingPlacementMode::BorderPlot) {
             const Vec2 plotMid = plotCenter(instance.plot);
             town.plotLabels.push_back(
-                {instance.id, units::toPixels(plotMid.x, pixelsPerUnit),
+                {static_cast<int>(instance.id), units::toPixels(plotMid.x, pixelsPerUnit),
                  units::toPixels(plotMid.y, pixelsPerUnit)});
-        } else if (instance.placementMode == BuildingPlacementMode::SegmentGapFill) {
-            constexpr float kGapFillOutlineUnits = 0.55f;
-            for (const BuildingFootprint& footprint : instance.footprints) {
-                appendFootprintOutline(town.buildingOutlineMesh, footprint, pixelsPerUnit,
-                                       kGapFillOutlineUnits, color);
-            }
-
+        } else if (instance.placementMode == BuildingPlacementMode::SegmentGapFill
+                   || instance.placementMode == BuildingPlacementMode::BorderBuilding) {
             if (!instance.footprints.empty()) {
                 Vec2 fpMid{};
                 for (const Vec2& corner : instance.footprints[0].corners) {
@@ -324,7 +432,7 @@ void rebuildOutlineMesh(Town& town, const DefCache& defs, float pixelsPerUnit, i
                 }
                 fpMid = fpMid * 0.25f;
                 town.plotLabels.push_back(
-                    {instance.id, units::toPixels(fpMid.x, pixelsPerUnit),
+                    {static_cast<int>(instance.id), units::toPixels(fpMid.x, pixelsPerUnit),
                      units::toPixels(fpMid.y, pixelsPerUnit)});
             }
         }
@@ -336,7 +444,7 @@ void rebuildOutlineMesh(Town& town, const DefCache& defs, float pixelsPerUnit, i
             }
             fpMid = fpMid * 0.25f;
             const int labelId = footprint.mainBuilding
-                                    ? instance.id
+                                    ? static_cast<int>(instance.id)
                                     : (footprint.labelId >= 0 ? footprint.labelId : 0);
             town.buildingLabels.push_back(
                 {labelId, units::toPixels(fpMid.x, pixelsPerUnit),
@@ -345,7 +453,51 @@ void rebuildOutlineMesh(Town& town, const DefCache& defs, float pixelsPerUnit, i
     }
 
     refreshBuildingDoorEdges(town, defs);
-    appendBuildingFootprintOutlines(town, pixelsPerUnit);
+
+    for (const BuildingInstance& instance : town.buildingInstances) {
+        const BuildingDef* def = defs.building(instance.typeId);
+        if (def == nullptr || def->terrain.placement == TerrainPlacementMode::None) {
+            continue;
+        }
+
+        const BuildingFootprint* mainFootprint = nullptr;
+        for (const BuildingFootprint& footprint : instance.footprints) {
+            if (footprint.mainBuilding) {
+                mainFootprint = &footprint;
+                break;
+            }
+        }
+        if (mainFootprint == nullptr || mainFootprint->doorEdge < 0) {
+            continue;
+        }
+
+        const Vec2 labelPos = terrainLabelPositionWorld(*mainFootprint);
+        std::string preferLabel;
+        if (def->terrain.preferKinds.size() > 1) {
+            for (std::size_t ki = 0; ki < def->terrain.preferKinds.size(); ++ki) {
+                if (ki > 0) {
+                    preferLabel += '+';
+                }
+                preferLabel += std::to_string(def->terrain.preferKinds[ki]);
+            }
+        } else {
+            preferLabel = std::to_string(def->terrain.prefer);
+        }
+        std::string labelText = defs.typeName(instance.typeId) + '\n'
+                                + terrainPlacementModeName(def->terrain.placement) + '/'
+                                + preferLabel;
+        town.terrainPlotTypeLabels.push_back(
+            {std::move(labelText), units::toPixels(labelPos.x, pixelsPerUnit),
+             units::toPixels(labelPos.y, pixelsPerUnit),
+             doorParallelRotationDeg(*mainFootprint)});
+    }
+
+    appendBuildingFootprintOutlines(town.buildingOutlineMesh, town, pixelsPerUnit);
+    appendBuildingFootprintOutlines(
+        town.terrainBuildingOutlineMesh, town, pixelsPerUnit,
+        [&](const BuildingInstance& inst) {
+            return buildingHasTerrainPlacement(defs, inst.typeId);
+        });
 }
 
 bool instanceOnAlleyRoad(const BuildingInstance& instance, int roadId) {
@@ -355,8 +507,12 @@ bool instanceOnAlleyRoad(const BuildingInstance& instance, int roadId) {
     if (instance.placementMode == BuildingPlacementMode::SegmentGapFill) {
         return instance.roadId == roadId;
     }
-    if (instance.placementMode == BuildingPlacementMode::PlotLot) {
+    if (instance.placementMode == BuildingPlacementMode::PlotLot
+        || instance.placementMode == BuildingPlacementMode::BorderPlot) {
         return instance.plot.roadId == roadId;
+    }
+    if (instance.placementMode == BuildingPlacementMode::BorderBuilding) {
+        return instance.roadId == roadId;
     }
     return false;
 }
@@ -367,6 +523,10 @@ const char* placementModeLabel(BuildingPlacementMode mode) {
         return "gap_fill";
     case BuildingPlacementMode::PlotLot:
         return "plot_lot";
+    case BuildingPlacementMode::BorderPlot:
+        return "border_plot";
+    case BuildingPlacementMode::BorderBuilding:
+        return "border_building";
     default:
         return "unknown";
     }
@@ -416,7 +576,11 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
     trimPlacementState(town, targetCount);
 
     ensurePlacementSyncMins(town, floors, townCfg, plots.frontageSetback);
-    ensureTownFrontageInitialized(town, plots.frontageSetback, floors, townCfg);
+    town.syncPixelsPerUnit = pixelsPerUnit;
+    const TerrainCatalog* catalog =
+        terrain != nullptr && terrain->catalog != nullptr ? terrain->catalog : town.syncTerrainCatalog;
+    ensureTownFrontageInitialized(town, plots.frontageSetback, floors, townCfg, terrain, &plots,
+                                  catalog, &defs.terrainProbes());
 
     const std::size_t secondaryBefore = town.secondaryRoadRecords.size();
     bool              secondaryTrimmed = false;
@@ -459,34 +623,42 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
         const int index = town.placementQueueCursor;
         if (index < static_cast<int>(queueTypes.size())) {
         BuildingInstance instance;
-        instance.id           = index;
-        instance.buildingType = queueTypes[static_cast<std::size_t>(index)];
+        instance.id     = static_cast<std::uint32_t>(index);
+        instance.typeId   = defs.typeIdFor(queueTypes[static_cast<std::size_t>(index)]);
 
         PlacementSearchLog searchLog;
         bool               placed     = false;
         bool               deferIndex = false;
         std::string        skipReason = "ring_no_slot";
-        const char*        zone       = zoneTypeForBuilding(defs, instance.buildingType);
+        const char*        zone       = zoneTypeForBuilding(defs, defs.typeName(instance.typeId));
         const bool         isRural    = zone && std::strcmp(zone, "rural") == 0;
-        const bool         fillIn     = isGapFillBuildingType(defs, instance.buildingType);
+        const bool         isAny      = zone && std::strcmp(zone, "any") == 0;
+        const bool         fillIn     = isGapFillBuildingType(defs, defs.typeName(instance.typeId));
 
         RoadAttemptMemo roadMemo;
         roadMemo.syncContext(town);
         PlacementPrep prep{};
         {
             PROFILE_SCOPE(ProfileScopeId::PlacementPrep);
-            prep = buildPlacementPrep(town, defs, instance.buildingType, index, townSeed,
+            prep = buildPlacementPrep(town, defs, defs.typeName(instance.typeId), index, townSeed,
                                         queue.maxBuildings());
         }
 
         Logger::log("layout",
                     "ring_attempt: queueIndex=" + std::to_string(index) + " type="
-                        + instance.buildingType + " suburban_max="
+                        + defs.typeName(instance.typeId) + " suburban_max="
                         + std::to_string(town.suburbanMaxHop) + " urban_core="
                         + std::to_string(town.urbanCoreMaxHop) + " phase="
                         + ringPhaseLabel(town.ringPhase));
 
-        if (isRural) {
+        if (isAny) {
+            placed = tryPlaceAnyOnRoads(town, instance, defs, plots, townSeed,
+                                        queue.maxBuildings(), searchLog, terrain, junctionHops,
+                                        prep, roadMemo);
+            if (!placed) {
+                skipReason = "any_no_slot";
+            }
+        } else if (isRural) {
             placed = tryPlaceRuralOnRoads(town, instance, defs, plots, townSeed,
                                           queue.maxBuildings(), searchLog, terrain, junctionHops,
                                           prep, roadMemo);
@@ -566,7 +738,13 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
                             "ring_band_exhausted: queueIndex=" + std::to_string(index)
                                 + " suburban_max=" + std::to_string(town.suburbanMaxHop)
                                 + " → bump");
+                const float prevSuburbanDist = suburbanMaxDist(town);
+                const float prevCoreDist =
+                    town.urbanCoreMaxHop >= 0 ? urbanCoreMaxDist(town) : -1.f;
                 bumpGrowthRings(town);
+                relocateMovableBuildingsAfterRingBump(
+                    town, defs, plots, townCfg, townSeed, queue.maxBuildings(), terrain,
+                    prevSuburbanDist, prevCoreDist);
                 roadMemo.clearFailures();
                 ++ringBumps;
                 ++town.placementBumpCount;
@@ -613,7 +791,7 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
                 skipReasonByIndex[index] = skipReason;
                 std::string skipLine =
                     "placement_skipped: queueIndex=" + std::to_string(index) + " type="
-                    + instance.buildingType + " reason=" + skipReason + " suburban_max="
+                    + defs.typeName(instance.typeId) + " reason=" + skipReason + " suburban_max="
                     + std::to_string(town.suburbanMaxHop) + " urban_core="
                     + std::to_string(town.urbanCoreMaxHop);
                 if (!isRural && !searchLog.resultSummary.empty()) {
@@ -674,7 +852,10 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
         town.placementSkipReasonsSummary.clear();
     }
 
-    {
+    const bool deferMeshForAutoExit =
+        config.growth.autoExit && config.growth.autoGrow > 0
+        && queue.activeCount() < config.growth.autoGrow;
+    if (!deferMeshForAutoExit) {
         PROFILE_SCOPE(ProfileScopeId::MeshRebuild);
         {
             PROFILE_SCOPE(ProfileScopeId::MeshOutline);
@@ -682,7 +863,7 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
         }
         {
             PROFILE_SCOPE(ProfileScopeId::MeshFrontageSeg);
-            rebuildFrontageSegmentMesh(town, plots, pixelsPerUnit);
+            rebuildFrontageSegmentMesh(town, plots, pixelsPerUnit, terrain);
         }
         int probeDisplayIndex = -1;
         if (town.urbanCoreMaxHop >= 0 && town.placementQueueCursor > 0) {

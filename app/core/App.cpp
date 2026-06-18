@@ -2,7 +2,9 @@
 
 #include "BuildingPlacer.h"
 #include "Logger.h"
+#include "MemoryReport.h"
 #include "Profile.h"
+#include "TerrainPlacement.h"
 #include "TownBuilder.h"
 #include "Units.h"
 
@@ -10,11 +12,14 @@
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <unordered_set>
 
-App::App(const Config& config, const TownConfig& townConfig, const DefCache& defs,
-         TerrainAtlas terrainAtlas, PlacementFloors placementFloors, GrowthConfig growthAuto)
+App::App(const Config& config, const TownConfig& townConfig, const TerrainCatalog& terrainCatalog,
+         const DefCache& defs, TerrainAtlas terrainAtlas, PlacementFloors placementFloors,
+         GrowthConfig growthAuto)
     : config_(config),
       townConfig_(townConfig),
+      terrainCatalog_(terrainCatalog),
       defs_(defs),
       placementFloors_(placementFloors),
       terrainAtlas_(std::move(terrainAtlas)),
@@ -41,6 +46,7 @@ App::App(const Config& config, const TownConfig& townConfig, const DefCache& def
 
     hud_.setTerrainControls(&terrainOverlayMode_, terrainAtlas_.valid);
     hud_.setZoneTintControl(&hopZoneTintEnabled_);
+    hud_.setBiomePlotControl(&showBiomePlots_);
 }
 
 sf::Color App::toColor(const std::array<uint8_t, 3>& rgb) const {
@@ -70,7 +76,8 @@ void App::drawCenterCross(sf::RenderTexture& target, float cx, float cy) const {
 
 void App::buildDiagram() {
     town_ = TownBuilder::build(config_, terrainAtlas_.valid ? &terrainAtlas_ : nullptr,
-                               placementFloors_, townConfig_);
+                               placementFloors_, townConfig_, &terrainCatalog_,
+                               &defs_.terrainProbes());
 
     const unsigned texW = static_cast<unsigned>(config_.renderWidth());
     const unsigned texH = static_cast<unsigned>(config_.renderHeight());
@@ -108,11 +115,19 @@ void App::buildDiagram() {
 }
 
 void App::drawIdLabels(const std::vector<FrontageSegmentLabel>& labels) {
+    drawIdLabels(labels, nullptr);
+}
+
+void App::drawIdLabels(const std::vector<FrontageSegmentLabel>& labels,
+                       const std::unordered_set<int>* onlyIds) {
     if (!labelFontLoaded_) {
         return;
     }
 
     for (const FrontageSegmentLabel& label : labels) {
+        if (onlyIds != nullptr && onlyIds->find(label.id) == onlyIds->end()) {
+            continue;
+        }
         const std::string text = std::to_string(label.id);
 
         sf::Text idText;
@@ -154,6 +169,44 @@ void App::drawBuildingLabels() {
 
 void App::drawRoadLabels() {
     drawIdLabels(town_.roadLabels);
+}
+
+void App::drawTerrainPlotTypeLabels() {
+    if (!labelFontLoaded_) {
+        return;
+    }
+
+    for (const RotatedTextLabel& label : town_.terrainPlotTypeLabels) {
+        sf::Text plotText;
+        plotText.setFont(labelFont_);
+        plotText.setString(label.text);
+        plotText.setCharacterSize(10);
+        plotText.setFillColor(sf::Color::Black);
+        plotText.setOutlineColor(sf::Color(255, 255, 255, 220));
+        plotText.setOutlineThickness(1.5f);
+        const sf::FloatRect bounds = plotText.getLocalBounds();
+        plotText.setOrigin(bounds.left + bounds.width * 0.5f,
+                           bounds.top + bounds.height * 0.5f);
+        plotText.setPosition(label.centerXPx, label.centerYPx);
+        plotText.setRotation(label.rotationDeg);
+        window_.draw(plotText);
+    }
+}
+
+std::unordered_set<int> App::terrainBuildingLabelIds() const {
+    std::unordered_set<int> ids;
+    for (const BuildingInstance& instance : town_.buildingInstances) {
+        if (!buildingHasTerrainPlacement(defs_, instance.typeId)) {
+            continue;
+        }
+        ids.insert(static_cast<int>(instance.id));
+        for (const BuildingFootprint& footprint : instance.footprints) {
+            if (!footprint.mainBuilding && footprint.labelId >= 0) {
+                ids.insert(footprint.labelId);
+            }
+        }
+    }
+    return ids;
 }
 
 int App::effectiveAutoGrowTarget() const {
@@ -219,15 +272,25 @@ int App::finishAutoGrowAndExit() {
     }
     Logger::flush();
 
+    writeMemoryReportOnce();
     window_.close();
     return failures;
+}
+
+void App::writeMemoryReportOnce() {
+    if (memoryReportWritten_) {
+        return;
+    }
+    memoryReportWritten_ = true;
+    MemoryReport::writeMarkdown(Logger::directory(), town_, terrainAtlas_, defs_, growthQueue_,
+                                townConfig_, config_);
 }
 
 void App::syncBuildingPlacements() {
     BuildingPlacer::sync(town_, growthQueue_, defs_, config_.plots, townConfig_, config_,
                          placementFloors_, config_.world.pixelsPerUnit, config_.town.seed,
                          terrainAtlas_.valid ? &terrainAtlas_ : nullptr);
-    hud_.setPlacementFailures(town_.placementFailureCount,
+    hud_.setPlacementFailures(town_.placementFailureCount, town_.moveFailureCount,
                               static_cast<int>(town_.buildingInstances.size()), town_);
 }
 
@@ -252,6 +315,7 @@ int App::run() {
         sf::Event event{};
         while (window_.pollEvent(event)) {
             if (event.type == sf::Event::Closed) {
+                writeMemoryReportOnce();
                 window_.close();
             }
 
@@ -277,6 +341,10 @@ int App::run() {
                         break;
                     }
                 }
+            }
+
+            if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::P) {
+                showBiomePlots_ = !showBiomePlots_;
             }
 
             if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Z) {
@@ -323,6 +391,10 @@ int App::run() {
         }
 
         window_.clear(background);
+        const bool skipDrawForAutoExit =
+            growthAuto_.autoExit && growthAuto_.autoGrow > 0
+            && town_.placementQueueCursor < effectiveAutoGrowTarget();
+        if (!skipDrawForAutoExit) {
         window_.setView(camera_.getView());
         if (terrainAtlas_.valid
             && terrainOverlayMode_ == TerrainOverlayMode::TerrainAndDebug) {
@@ -338,13 +410,21 @@ int App::run() {
             window_.draw(town_.junctionMesh);
         }
         drawRoadLabels();
-        window_.draw(town_.frontageSegmentMesh);
-        window_.draw(town_.frontageInwardArrowMesh);
-        drawFrontageSegmentLabels();
-        window_.draw(town_.alleyProbeFailMesh);
-        window_.draw(town_.buildingOutlineMesh);
-        drawPlotLabels();
-        drawBuildingLabels();
+        if (!showBiomePlots_) {
+            window_.draw(town_.frontageSegmentMesh);
+            window_.draw(town_.frontageInwardArrowMesh);
+            drawFrontageSegmentLabels();
+            window_.draw(town_.alleyProbeFailMesh);
+            window_.draw(town_.buildingOutlineMesh);
+            drawPlotLabels();
+            drawBuildingLabels();
+        } else {
+            window_.draw(town_.terrainBuildingOutlineMesh);
+            const std::unordered_set<int> terrainIds = terrainBuildingLabelIds();
+            drawIdLabels(town_.plotLabels, &terrainIds);
+            drawIdLabels(town_.buildingLabels, &terrainIds);
+            drawTerrainPlotTypeLabels();
+        }
         const bool drawDebug =
             terrainAtlas_.valid
             && (terrainOverlayMode_ == TerrainOverlayMode::TerrainAndDebug
@@ -355,6 +435,7 @@ int App::run() {
             window_.draw(terrainAtlas_.debugShoreMesh);
             window_.draw(terrainAtlas_.debugForestMesh);
             window_.draw(terrainAtlas_.debugHillsMesh);
+        }
         }
         window_.setView(window_.getDefaultView());
         hud_.draw(window_);

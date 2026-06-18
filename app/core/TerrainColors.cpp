@@ -1,31 +1,13 @@
 #include "TerrainColors.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 
-TerrainKind terrainKindFromConfigKey(const std::string& key) {
-    if (key == "sea") {
-        return TerrainKind::Sea;
-    }
-    if (key == "river") {
-        return TerrainKind::River;
-    }
-    if (key == "plains") {
-        return TerrainKind::Plains;
-    }
-    if (key == "forest") {
-        return TerrainKind::Forest;
-    }
-    if (key == "hills") {
-        return TerrainKind::Hills;
-    }
-    if (key == "mountain") {
-        return TerrainKind::Mountain;
-    }
-    return TerrainKind::Unknown;
-}
-
-std::vector<TerrainColorEntry> loadTerrainColorMap(const std::filesystem::path& path) {
+std::vector<TerrainColorEntry> loadTerrainColorMap(const std::filesystem::path& path,
+                                                   const TerrainCatalog& catalog) {
     std::vector<TerrainColorEntry> entries;
     std::ifstream                  file(path);
     if (!file) {
@@ -57,9 +39,9 @@ std::vector<TerrainColorEntry> loadTerrainColorMap(const std::filesystem::path& 
         }
 
         TerrainColorEntry entry;
-        entry.rgb  = {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
-        entry.kind = terrainKindFromConfigKey(key);
-        if (entry.kind != TerrainKind::Unknown) {
+        entry.rgb = {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
+        entry.id  = catalog.resolveKey(key);
+        if (entry.id != kTerrainUnknown) {
             entries.push_back(entry);
         }
     }
@@ -67,12 +49,59 @@ std::vector<TerrainColorEntry> loadTerrainColorMap(const std::filesystem::path& 
     return entries;
 }
 
-TerrainKind classifyTerrainColor(uint8_t r, uint8_t g, uint8_t b,
-                                 const std::vector<TerrainColorEntry>& colorMap) {
+namespace {
+
+constexpr int kMaxChannelDelta = 32;
+
+int rgbDistanceSq(uint8_t r, uint8_t g, uint8_t b, const std::array<uint8_t, 3>& rgb) {
+    const int dr = static_cast<int>(r) - static_cast<int>(rgb[0]);
+    const int dg = static_cast<int>(g) - static_cast<int>(rgb[1]);
+    const int db = static_cast<int>(b) - static_cast<int>(rgb[2]);
+    return dr * dr + dg * dg + db * db;
+}
+
+int maxChannelDelta(uint8_t r, uint8_t g, uint8_t b, const std::array<uint8_t, 3>& rgb) {
+    return std::max({std::abs(static_cast<int>(r) - static_cast<int>(rgb[0])),
+                     std::abs(static_cast<int>(g) - static_cast<int>(rgb[1])),
+                     std::abs(static_cast<int>(b) - static_cast<int>(rgb[2]))});
+}
+
+bool kindTieBreak(TerrainId candidate, TerrainId incumbent) {
+    if (candidate == incumbent) {
+        return false;
+    }
+    return false;
+}
+
+}  // namespace
+
+TerrainId classifyTerrainColor(uint8_t r, uint8_t g, uint8_t b,
+                               const std::vector<TerrainColorEntry>& colorMap) {
     for (const TerrainColorEntry& entry : colorMap) {
         if (entry.rgb[0] == r && entry.rgb[1] == g && entry.rgb[2] == b) {
-            return entry.kind;
+            return entry.id;
         }
     }
-    return TerrainKind::Unknown;
+
+    TerrainId    bestKind     = kTerrainUnknown;
+    int         bestDistSq   = 0;
+    int         bestMaxDelta = 0;
+    bool        haveBest     = false;
+
+    for (const TerrainColorEntry& entry : colorMap) {
+        const int distSq   = rgbDistanceSq(r, g, b, entry.rgb);
+        const int maxDelta = maxChannelDelta(r, g, b, entry.rgb);
+        if (maxDelta > kMaxChannelDelta) {
+            continue;
+        }
+        if (!haveBest || distSq < bestDistSq
+            || (distSq == bestDistSq && kindTieBreak(entry.id, bestKind))) {
+            bestKind     = entry.id;
+            bestDistSq   = distSq;
+            bestMaxDelta = maxDelta;
+            haveBest     = true;
+        }
+    }
+
+    return haveBest ? bestKind : kTerrainUnknown;
 }

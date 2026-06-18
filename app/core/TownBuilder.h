@@ -9,5 +9,7 @@ struct TerrainAtlas;
 class TownBuilder {
 public:
     static Town build(const Config& config, const TerrainAtlas* terrain,
-                      const PlacementFloors& floors, const TownConfig& townCfg);
+                      const PlacementFloors& floors, const TownConfig& townCfg,
+                      const TerrainCatalog* catalog = nullptr,
+                      const TerrainProbeConfig* probes = nullptr);
 };

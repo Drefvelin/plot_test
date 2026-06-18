@@ -20,9 +20,10 @@ Think of concentric rings measured in **hops** (how many road junctions away fro
 |------|-----------------|
 | **Core** | Urban and residential buildings (houses, workshops, churches). This is the dense heart. |
 | **Suburban** | Same urban/residential buildings. Core is *inside* suburban — suburban is the larger town area that includes the core. |
-| **Rural** | Farms and resource buildings only. **Outside** suburban — not in the town ring. |
+| **Rural** | Farms and rural terrain buildings (`farm`, `lumber_camp`, `mine`). **Outside** suburban — not in the town ring. |
+| **Any** | Border terrain buildings (`fisher_hut`, `watermill`). **Any** road frontage that fits — core, suburban, or rural. Still terrain-first (sea/river preference). |
 
-Rural is strictly **beyond** the suburban edge. Urban/residential never use the rural band.
+Rural is strictly **beyond** the suburban edge. Urban/residential never use the rural band. **`any`** ignores hop band limits but keeps terrain rules.
 
 ### Every building type uses plots
 
@@ -41,7 +42,41 @@ Gap-fill is **not** a substitute for plots. It is **not** used in suburban-only 
 
 **Churches** have `fill_in: false` — plot only, never gap-fill.
 
-**Farms / resources** — rural band, plot only.
+**Farms / rural specials** — rural band, plot only. Types: `farm`, `lumber_camp`, `mine`.
+
+**Border terrain (`type: any`)** — `fisher_hut`, `watermill`. Plot on **any** eligible frontage (town ring or fringe); terrain-first border/scan still applies.
+
+### Terrain placement
+
+Rural (and any building with a `terrain:` block in [`buildings.yml`](../app/config/buildings.yml)) can require a **preferred biome** and a **placement mode**:
+
+| Mode | Meaning | Hard minimum | Scoring |
+|------|---------|--------------|---------|
+| **inside** | Plot should sit on the preferred kind | ≥1 plot corner on `prefer` and buildable | Higher score when more corners match |
+| **proximity** | Near the biome outline edge | Buildable only; segment beyond `proximity_max_dist` skipped in terrain scan | Closer to outline = better |
+| **border** | Plot on road frontage facing preferred outline; main on plot back (band) or hugging outline | Plot buildability + border band/hug rules; building: no road/building overlap only; water spill OK | Closest border bucket segment by `centerDist` |
+
+**Requirement** (`terrain.requirement`):
+
+| Value | On terrain-first failure |
+|-------|--------------------------|
+| **loose** (default) | Fall back to vanilla frontier road plot on the same band scope (no terrain *preference* rules; standard buildability still applies) |
+| **strict** | Fail placement (`watermill` only today) |
+
+**Majority rule:** if `terrain.prefer` equals the map's `majorityLandKind`, **proximity is treated as inside** (no outline to measure against).
+
+**Terrain-first order** ([`GrowthRings.cpp`](../app/core/GrowthRings.cpp) `tryPlaceRuralOnRoads` / `tryPlaceAnyOnRoads`):
+
+1. **Border types** — [`tryPlaceBorderPlot`](../app/core/BorderPlacement.cpp): peek [`BorderFrontier`](../app/core/BorderFrontier.cpp) buckets (plot segments whose inward ray reaches the building's `prefer` outline before crossing another road); **plot required** on frontage (`buildBorderHugPlot` / band plot), then main building (band = back of plot; hug = extend beyond plot to outline). Up to `border_max_attempts` (default 32) segment retries; failed attempts log `border_attempt_fail`. Loose hug retries **band** style after exhaustion.
+2. **All terrain types** — `tryPlaceRoadPlot` with **terrain scan** (`collectFrontageSlots` sorted by zone + terrain score; not the centerDist frontier).
+3. **Loose only** — after terrain scan, **`terrain_anchor`** (BFS from last real terrain placement on that `prefer` kind; cap = `plots.terrain_anchor_max_roads` in [`config.yml`](../app/config/config.yml), default **4**) then vanilla frontier on the type's band scope (`frontier_loose_fallback` in layout log). Rural = rural band only; `any` = all bands. Anchor roads are updated only by successful terrain scan or border placement — not by anchor/loose fallback.
+4. **Strict** — stop after step 2 fails (`terrain_strict_fail` in layout log).
+
+Urban/residential buildings without `terrain:` still use the plot frontier only.
+
+`farm` is not special — `terrain: { prefer: plains, placement: inside, requirement: loose }` like any other inside type.
+
+Config keys: `terrain.prefer` (scalar **or YAML list** — OR semantics at peek; alias `water` → sea+river), `terrain.placement`, `terrain.requirement`, `border_style` (`band`|`hug`), `border_overhang_dist`, `proximity_max_dist`, `border_min_dist`, `border_max_dist`. Town [`town.yml`](../app/config/town.yml): `border_max_attempts`. Border buckets rebuilt at `FullRebuild` and refreshed per bank on carve. Logic in [`BorderFrontier.cpp`](../app/core/BorderFrontier.cpp), [`BorderPlacement.cpp`](../app/core/BorderPlacement.cpp), [`TerrainPlacement.cpp`](../app/core/TerrainPlacement.cpp). Terrain scan / anchor still use `preferKinds.front()` when a list is given.
 
 ### Roads are roads
 
@@ -56,9 +91,10 @@ The Voronoi roads at town creation, terrain corridors, bridges, and **alleys** a
 1. Shuffle a queue of building types (houses, workshops, etc.).
 2. For each queue entry, try to place one building.
 3. **Urban/residential:** pull closest eligible plot frontage from distance buckets (core / suburban), then gap-fill from wall-gap frontier when densifying core.
-4. **Rural:** pull closest eligible plot from rural bucket only.
-5. If the town ring is full for this building, **expand** the ring (bump) and try again.
-6. In **core densify** phase (after a bump), types with `fill_in` may also create **new alleys** from wall gaps and use **gap-fill** on core roads — still on real road frontage, still band-aware.
+4. **Rural:** terrain-tagged types use terrain-first scan on the rural band; others pull closest eligible plot from rural frontier bucket.
+5. **Any:** `fisher_hut` / `watermill` — terrain-first on **all** roads (no hop band filter); no ring bump loop.
+6. If the town ring is full for this building, **expand** the ring (bump) and try again.
+7. In **core densify** phase (after a bump), types with `fill_in` may also create **new alleys** from wall gaps and use **gap-fill** on core roads — still on real road frontage, still band-aware.
 
 ### Common misconceptions (wrong vs right)
 
@@ -84,8 +120,10 @@ Per-road placement is centralized in `tryPlaceOnTownRoad` (`GrowthRings.cpp`): *
 - [`Road`](../app/core/Town.h): segment `a`–`b`; flags `isSecondary`, `isBridge`, `isTerrainCorridor`.
 - [`RoadSideFrontage`](../app/core/Town.h): per-bank `segments` (plot frontage) and `wallSegments` (free wall gaps) with `startT`/`endT` along the road edge.
 - **Wall segments:** one span per bank at init `[setback, len−setback]`; carved only by `carveRoadWallForFootprint` on **main** building footprints (plot lots and gap-fill). Plot width does not carve the wall line — gaps between main fronts remain in `wallSegments`. Alley/gap-fill collectors read stored `wallSegments`.
-- [`Plot`](../app/core/Town.h): `corners[4]`, `roadId`, `roadBank`, `area`; created at placement time on the instance.
-- [`BuildingInstance`](../app/core/Town.h): `buildingType`, `plot`, `footprints`, `placementMode`.
+- [`Plot`](../app/core/Town.h): `corners[4]`, `roadId`, `roadBank`, `area`, optional `outlineTangent` / `outlineInward` (hug plots); created at placement time on the instance.
+- [`BuildingInstance`](../app/core/Town.h): `id` (uint32 queue index), `typeId` (uint16 DefCache building type id), `plot`, `footprints`, `placementMode`.
+- **Footprint orthogonality:** every `BuildingFootprint` must be an orthogonal rectangle (four 90° corners; axis-aligned or rotated, never a parallelogram warped to plot sides). Building orientation is **not** required to match plot front/back or outline tangent. Enforced via `footprintHasRightAngles` in [`PlotGeometry.cpp`](../app/core/PlotGeometry.cpp) (`footprintPlacementValid`, gap-fill, border placement).
+- **Border building layout:** border types peek per-terrain **border frontier** buckets (road plot segments classified by inward ray → nearest outline, rejected if another road is hit closer than the outline). **Plot required** on frontage; then main at plot back (band, shrink steps) or hugging outline (may extend beyond plot). Validation: **no road overlap** and **no building overlap** only — water spill OK. Failed attempts log `border_attempt_fail` with `main=` / `slot=` reject counts. Loose hug retries band style.
 
 ### Zone types (`buildings.yml` → `BuildingDef.type`)
 
@@ -94,8 +132,11 @@ Per-road placement is centralized in `tryPlaceOnTownRoad` (`GrowthRings.cpp`): *
 | `residential` | Town ring: `roadHop <= suburbanMaxHop` | **Required** | Only if `fill_in: true` **and** road in **core** (`roadHop <= urbanCoreMaxHop`) **and** core densify active |
 | `urban` | Town ring | **Required** | Same as residential |
 | `rural` | `roadHop > suburbanMaxHop` | **Required** | Never |
+| `any` | No hop gate (all roads) | **Required** | Never |
 
 `fill_in` in YAML maps to `BuildingDef.fillIn`. It is a **permission** for core gap-fill, not a replacement for plots.
+
+`fisher_hut` and `watermill` use `type: any` — terrain-first border placement along preferred outline kinds.
 
 ### Hop rings (`Town` + `GrowthRings.cpp`)
 
@@ -125,10 +166,10 @@ Helpers: `roadHop`, `collectSuburbanRoadIds`, `collectCoreRoadIds`, `collectRura
 
 | Function | File | Role |
 |----------|------|------|
-| `PlacementFrontier` | `PlacementFrontier.cpp` | Distance-bucketed frontiers (`plot[3]`, `wall[3]`, `alley`); rebuilt on sync init / topology change; incremental refresh on carve |
+| `PlacementFrontier` | `FrontierManager` + `PlacementFrontier.cpp` | Unified storage on `Town.frontierManager` (`plot[3]`, `wall[3]`, `alley`, terrain-scan, `border[]`); peek/consume APIs for plot/wall/alley/scan/border |
 | `peekClosestPlotSlot` / `peekClosestWallGapSlot` | `PlacementFrontier.cpp` | Pull closest-first segment in selected bands (merge ≤3 bucket heads) |
-| `collectFrontageSlots` | `FrontagePlacement.cpp` | Legacy full scan; retained for per-road `roadFilter >= 0` fallback and debug |
-| `tryPlaceRoadPlot` | `FrontagePlacement.cpp` | Frontier pull when `roadFilter < 0`; pick slot, depth cap, validate plot, `layoutBuildingsOnPlot` → `PlotLot` |
+| `collectFrontageSlots` | `FrontagePlacement.cpp` | Full scan; terrain-first rural path + per-road `roadFilter >= 0` fallback |
+| `tryPlaceRoadPlot` | `FrontagePlacement.cpp` | `RoadPlotSearchMode`: Frontier (urban/rural default), TerrainScan (terrain-first rural), FrontierLooseFallback (loose rural retry) |
 | `tryPlaceSegmentMain` | `FrontageGapFill.cpp` | **Core densify only** for `fill_in` types: wall-gap frontier pull when `roadFilter < 0` |
 
 **Intended order per road (urban/residential):**
@@ -136,23 +177,29 @@ Helpers: `roadHop`, `collectSuburbanRoadIds`, `collectCoreRoadIds`, `collectRura
 1. `tryPlaceRoadPlot` (always).
 2. If `fill_in` && core band && `DensifyCore`: optional `tryPlaceSegmentMain` on same road (gap-fill). *Open design note:* gap-fill may remain footprint-first for tight gaps; houses should still prefer full plots — see product rule below.*
 
-**Rural:** `tryPlaceRoadPlot` only with rural frontier band. Ordering is **closest-first by `centerDist`** (not rural target-distance zone score on the frontier path).
+**Rural:** `tryPlaceRuralOnRoads` — terrain-tagged types use terrain-first on the rural band (border placer → terrain scan → **terrain anchor** → loose frontier fallback or strict fail). Non-terrain rural uses rural frontier band only (closest-first by **road midpoint** distance). `Town.lastTerrainAnchorRoadId[prefer]` stores the road id of the last successful terrain scan/border placement per `TerrainKind`.
 
-### Placement frontiers (`PlacementFrontier.cpp`)
+**Any:** `tryPlaceAnyOnRoads` — same terrain-first pipeline as rural but `BandFilter::none()` (all roads). Used by `fisher_hut` and `watermill`. No ring bump loop.
 
-Hot-path slot collection uses maintained frontiers instead of scanning all roads each attempt:
+### Placement frontiers (`FrontierManager` + `PlacementFrontier.cpp`)
 
-| Bucket | Source segments | Band (`centerDist`) |
-|--------|-----------------|---------------------|
-| `plot[0..2]` | `side.segments` with `width >= syncMinPlotFrontage` | Core / suburban / rural |
+All frontier buckets live on **`Town.frontierManager`**. Hot-path slot collection uses maintained frontiers instead of scanning all roads each attempt:
+
+| Bucket | Source segments | Band (road midpoint) |
+|--------|-----------------|----------------------|
+| `plot[0..2]` | `side.segments` with `width >= syncMinPlotFrontage` | Core / suburban / rural via `roadFrontierBand(town, roadId)` |
 | `wall[0..2]` | `side.wallSegments` with `width >= syncMinGapWidth` | Same bands |
-| `alley` | Developed-bank wall gaps in core, not in `checkedAlleyGaps` | Core distance only |
+| `alley` | Developed-bank wall gaps in core, not in `checkedAlleyGaps` | Core distance only (road midpoint) |
+| `border[]` | Plot frontage segments whose inward ray hits a terrain outline (`BorderSlotRef`) | `peekNextBorderSlot` by road midpoint; `consumeBorderSlot` on place |
+| `scanPlains` / `scanForest` / `scanHills` | Road plot segments at bootstrap | Terrain proximity/inside |
 
-- **Rebuild:** `rebuildPlacementFrontier` once at town bootstrap and after full `rebuildSecondaryRoadsFromRecords` (debug/trim); `frontierExtendBands` on ring bump re-syncs **wall** geometry for roads whose distance band changed and **re-buckets plot frontier refs** (`frontierRefreshPlotBank` per bank — plot segment geometry unchanged, but refs must move e.g. Rural→Suburban when the ring expands).
-- **Incremental:** `frontierRefreshPlotBank` / `WallBank` / `AlleyBank` from carve hooks in `Town.cpp`; `frontierRefreshRoad` after incremental alley apply.
-- **Pull:** `peekClosestPlotSlot` / `peekClosestWallGapSlot` merge selected bucket heads by `centerDist`; failed attempts skip segment IDs for the rest of that placement try; successful carve refreshes the bank.
-- **Rural behavior change:** frontier path orders rural plots by distance from town centre, not `scoreSegmentForZone` rural target key.
-- **Ring bumps** remain until a follow-up replaces them with slice extension; empty frontier → existing bump loop in `BuildingPlacer.cpp`.
+- **Sync:** `notifyPlacementFrontier` only — no direct `frontierRefresh*` from carve/placement code. Events: `FullRebuild`, `PlotCarved`, `RingExtended`, `TopologyChanged`, `InstanceRemoved`.
+- **Rebuild:** `FullRebuild` rebuilds plot/wall/alley + terrain-scan + border (town bootstrap after `ensureTownFrontageInitialized`). `TopologyChanged` is **bulk secondary replay only** (`rebuildSecondaryRoadsFromRecords`) — same rebuilds, not per-alley.
+- **Incremental alley:** `applySecondaryRoadRecord` calls `notifyRoadFrontierRefresh` on host, new alley, and roads sharing endpoints at `a`/`b` — not `TopologyChanged`.
+- **Border placement:** [`BorderPlacement.cpp`](../app/core/BorderPlacement.cpp) + [`BorderFrontier.cpp`](../app/core/BorderFrontier.cpp). Plot-first on peeked segment; band/hug building layout; retry loop (`border_max_attempts`). **`placement: border`** types never use `frontier_loose_fallback`; loose retries **band** after hug fails.
+- **Incremental:** `PlotCarved` refreshes plot/wall/alley bank + terrain-scan + border bank. `InstanceRemoved` refreshes bank when border building removed. Restore replay suppresses notify.
+- **Ring bump:** `RingExtended` runs `frontierExtendBands` (wall resync on band change, re-bucket all three road frontier types per affected bank).
+- **Pull:** `peekClosestPlotSlot` / `peekClosestWallGapSlot` / `peekNextTerrainScanSlot` — unchanged behaviour.
 
 ### Alleys
 
@@ -195,7 +242,8 @@ Orchestration in `GrowthRings.cpp` (`tryPlaceInUrbanCore`, pending fills) should
 
 1. `ensureTownFrontageInitialized` once at town build (segments + frontier bootstrap).
 2. For each queue index until cursor reaches target:
-   - **Rural** → `tryPlaceRuralOnRoads` (plot only).
+   - **Rural** → `tryPlaceRuralOnRoads` (plot only, rural band).
+   - **Any** → `tryPlaceAnyOnRoads` (plot only, all bands; terrain-first).
    - **Urban/residential** → pending alley plot attempts (same plot API) → optional `tryPlaceInUrbanCore` when `DensifyCore` → town-ring road sweep (`tryPlaceSuburbanOnRoads`: **plot per road**, then core gap-fill only when gated) → bump loop on exhaustion.
 3. Success → `buildingInstances.push_back`; failure → `placementFailedIndices`.
 
@@ -230,6 +278,9 @@ farm:
 
 | Rule | Location | Status |
 |------|----------|--------|
+| Depth-cache key quantization | `kDepthCacheTStep` / `kDepthCacheDimStep` in [`PlotGeometry.cpp`](../app/core/PlotGeometry.cpp) — fewer distinct per-bank depth memo entries | Done |
+| Building type IDs | [`BuildingTypes.h`](../app/core/BuildingTypes.h), `DefCache::typeIdFor`, `BuildingInstance.typeId` | Done |
+| Sim memory report | [`MemoryReport.cpp`](../app/core/MemoryReport.cpp) — markdown breakdown on exit; alley probe debug excluded from sim totals | Done |
 | Plot before gap-fill | `tryPlaceOnTownRoad` | Done |
 | Frontier plot / wall / alley pull | `PlacementFrontier.cpp`, `FrontagePlacement.cpp`, `FrontageGapFill.cpp`, `SecondaryRoadPlacement.cpp` | Done |
 | Gap-fill only in core | `mayGapFillOnRoad` | Done |
@@ -242,6 +293,7 @@ farm:
 
 | File | Role |
 |------|------|
+| [`MemoryReport.cpp`](../app/core/MemoryReport.cpp) | Sim memory breakdown on exit |
 | [`PlacementFrontier.cpp`](../app/core/PlacementFrontier.cpp) | Distance-bucketed plot/wall/alley frontiers |
 | [`BuildingPlacer.cpp`](../app/core/BuildingPlacer.cpp) | Growth sync, queue cursor |
 | [`GrowthRings.cpp`](../app/core/GrowthRings.cpp) | Hop bands, road sweeps, bump |
