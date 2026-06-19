@@ -109,6 +109,8 @@ int main(int argc, char* argv[]) {
                     "auto_grow enabled target=" + std::to_string(growthAuto.autoGrow) + " ms="
                         + std::to_string(growthAuto.autoGrowMs) + " auto_exit="
                         + (growthAuto.autoExit ? "yes" : "no"));
+    } else if (growthAuto.autoExit) {
+        Logger::log("app", "auto_exit enabled (quit after town load)");
     }
 
     TerrainAtlas terrainAtlas = bakeTerrain(config, terrainCatalog, projectRoot);

@@ -340,10 +340,12 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain,
     splitRoadsAtIntersections(town);
     const int roadsAfterSplit = static_cast<int>(town.roads.size());
 
-    if (terrain != nullptr && config.terrain.bridgesEnabled) {
-        splitRoadsAtForbiddenBoundary(town, *terrain);
-        indexJunctions(town);
-        resolveBridges(town, *terrain, config);
+    if (terrain != nullptr) {
+        sanitizeRoadGraphAtWater(town, *terrain);
+        mergeWatersideJunctions(town, *terrain, config);
+        if (config.terrain.bridgesEnabled) {
+            resolveBridges(town, *terrain, config);
+        }
     }
 
     indexJunctions(town);

@@ -262,6 +262,7 @@ struct Town {
     int               frontageSegmentIdCounter = 0;
     int               wallSegmentIdCounter     = 0;
     sf::VertexArray   roadMesh{sf::Triangles};
+    std::unordered_set<int> bridgeCandidateJunctionIds;
     sf::VertexArray   junctionMesh{sf::Triangles};
     sf::VertexArray   roadEndProbeMesh{sf::Triangles};
     sf::VertexArray   frontageSegmentMesh{sf::Triangles};

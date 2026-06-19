@@ -8,9 +8,9 @@ Shore and river **corridor roads** are baked from terrain masks (separate inset/
 Voronoi roads + disc border
   → appendCorridorRoads (shore + river graphs)
   → splitRoadsAtIntersections
-  → indexJunctions
+  → sanitizeRoadGraphAtWater (corridors + Voronoi; once at load)
+  → resolveBridges (optional)
   → cullVoronoiRoadsParallelToCorridors
-  → indexJunctions (again)
   → assignRoadSideInwards + meshes + placement
 ```
 
@@ -58,6 +58,7 @@ Logged on channel `terrain`: `shore_road_nodes`, `river_road_nodes`, insets, spa
 |-----|------|
 | `appendCorridorRoads` | Emits all corridor polyline segments with `isTerrainCorridor = true` |
 | `splitRoadsAtIntersections` | Interior crosses via `segmentCrossingParams` (PlotGeometry); min segment 0.5u; re-index `road.id`; frontage reset on splits |
+| `sanitizeRoadGraphAtWater` | Load-time boundary split + clip trim for all non-bridge primaries (Voronoi + corridor) |
 | `cullVoronoiRoadsParallelToCorridors` | Removes parallel non-incident Voronoi roads along corridor chains |
 
 Corridor roads count as **primary** (`primaryRoadCount`).
@@ -72,6 +73,7 @@ Channel `voronoi`:
 
 ## Acceptance
 
+- Corridor and Voronoi roads trimmed to buildable land at load; no graph roads or junctions in water (bridges excepted)
 - Full corridor roads visible on map (sea + river); junctions (red) at corridor × Voronoi crosses after split
 - No thin sliver road strips between corridor and interior Voronoi road on river/coast test areas
 - Radial Voronoi roads still cross corridors at junctions; parallel "back roads" removed
@@ -80,8 +82,8 @@ Channel `voronoi`:
 ## Out of scope
 
 - Partial clip of parallel Voronoi span (whole-road delete only)
-- Bridges at corridor × water
 - Snapping corridor endpoints to existing junctions before split
 - Serialized atlas cache
+- Runtime water sanitize during placement or alley rebuild
 
 See also: [terrain-roadmap.md](terrain-roadmap.md) Phase 4.

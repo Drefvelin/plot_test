@@ -248,10 +248,14 @@ void buildJunctionMesh(Town& town, float pixelsPerUnit, float radiusUnits) {
     town.junctionMesh.setPrimitiveType(sf::Triangles);
     town.junctionMesh.clear();
 
+    const sf::Color kBridgeCandidatePurple(128, 0, 200);
     for (const Junction& junction : town.junctions) {
         const sf::Vector2f center{units::toPixels(junction.pos.x, pixelsPerUnit),
                                   units::toPixels(junction.pos.y, pixelsPerUnit)};
-        appendJunctionDisc(town.junctionMesh, center, radiusPx, sf::Color(255, 0, 0));
+        const bool isCandidate =
+            town.bridgeCandidateJunctionIds.count(junction.id) != 0;
+        appendJunctionDisc(town.junctionMesh, center, radiusPx,
+                             isCandidate ? kBridgeCandidatePurple : sf::Color(255, 0, 0));
     }
 }
 

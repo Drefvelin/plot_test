@@ -168,7 +168,56 @@ void App::drawBuildingLabels() {
 }
 
 void App::drawRoadLabels() {
-    drawIdLabels(town_.roadLabels);
+    if (!labelFontLoaded_) {
+        return;
+    }
+
+    const float ppu = config_.world.pixelsPerUnit;
+    constexpr float kOffsetPx       = 18.f;
+    constexpr unsigned kCharacterSize = 14;
+
+    for (const Road& road : town_.roads) {
+        const Vec2 mid   = (road.a + road.b) * 0.5f;
+        const Vec2 delta = road.b - road.a;
+        const float len  = delta.length();
+
+        Vec2 perp{0.f, -1.f};
+        if (len > 1e-4f) {
+            perp = Vec2{-delta.y / len, delta.x / len};
+            if (perp.y > 0.f) {
+                perp.x = -perp.x;
+                perp.y = -perp.y;
+            }
+        }
+
+        const float centerXPx = mid.x * ppu + perp.x * kOffsetPx;
+        const float centerYPx = mid.y * ppu + perp.y * kOffsetPx;
+
+        sf::Text idText;
+        idText.setFont(labelFont_);
+        idText.setString(std::to_string(road.id));
+        idText.setCharacterSize(kCharacterSize);
+        idText.setFillColor(road.isBridge ? toColor(config_.colors.bridge) : sf::Color::Black);
+        idText.setOutlineColor(sf::Color(255, 255, 255, 230));
+        idText.setOutlineThickness(2.f);
+        const sf::FloatRect textBounds = idText.getLocalBounds();
+        const float       boxW         = std::max(26.f, textBounds.width + 12.f);
+        const float       boxH         = 22.f;
+
+        sf::RectangleShape box({boxW, boxH});
+        box.setOrigin(boxW * 0.5f, boxH * 0.5f);
+        box.setPosition(centerXPx, centerYPx);
+        box.setFillColor(sf::Color(255, 255, 255, 235));
+        box.setOutlineColor(road.isBridge ? toColor(config_.colors.bridge) : sf::Color::Black);
+        box.setOutlineThickness(road.isBridge ? 2.f : 1.5f);
+
+        idText.setOrigin(textBounds.left + textBounds.width * 0.5f,
+                         textBounds.top + textBounds.height * 0.5f + 1.f);
+        idText.setPosition(centerXPx, centerYPx);
+
+        window_.draw(box);
+        window_.draw(idText);
+    }
 }
 
 void App::drawTerrainPlotTypeLabels() {
@@ -308,6 +357,14 @@ int App::run() {
     Logger::log("app", "town growth queue max=" + std::to_string(growthQueue_.maxBuildings())
                            + " seed=" + std::to_string(config_.town.seed));
 
+    if (growthAuto_.autoExit && growthAuto_.autoGrow <= 0) {
+        Logger::log("app", "auto_exit after load (no auto_grow target)");
+        Logger::flush();
+        writeMemoryReportOnce();
+        window_.close();
+        return 0;
+    }
+
     const sf::Color background = toColor(config_.colors.outside);
     bool panLogged = false;
 
@@ -396,6 +453,10 @@ int App::run() {
             && town_.placementQueueCursor < effectiveAutoGrowTarget();
         if (!skipDrawForAutoExit) {
         window_.setView(camera_.getView());
+        const bool drawDebug =
+            terrainAtlas_.valid
+            && (terrainOverlayMode_ == TerrainOverlayMode::TerrainAndDebug
+                || terrainOverlayMode_ == TerrainOverlayMode::DebugOnly);
         if (terrainAtlas_.valid
             && terrainOverlayMode_ == TerrainOverlayMode::TerrainAndDebug) {
             window_.draw(terrainSprite_);
@@ -404,12 +465,16 @@ int App::run() {
         }
         if (hopZoneTintEnabled_) {
             window_.draw(town_.hopDebugRoadMesh);
-            window_.draw(town_.hopDebugJunctionMesh);
         } else {
             window_.draw(town_.roadMesh);
-            window_.draw(town_.junctionMesh);
         }
-        drawRoadLabels();
+        if (!drawDebug) {
+            if (hopZoneTintEnabled_) {
+                window_.draw(town_.hopDebugJunctionMesh);
+            } else {
+                window_.draw(town_.junctionMesh);
+            }
+        }
         if (!showBiomePlots_) {
             window_.draw(town_.frontageSegmentMesh);
             window_.draw(town_.frontageInwardArrowMesh);
@@ -425,17 +490,19 @@ int App::run() {
             drawIdLabels(town_.buildingLabels, &terrainIds);
             drawTerrainPlotTypeLabels();
         }
-        const bool drawDebug =
-            terrainAtlas_.valid
-            && (terrainOverlayMode_ == TerrainOverlayMode::TerrainAndDebug
-                || terrainOverlayMode_ == TerrainOverlayMode::DebugOnly);
         if (drawDebug) {
             window_.draw(terrainAtlas_.debugForbiddenMesh);
             window_.draw(terrainAtlas_.debugRiverMesh);
             window_.draw(terrainAtlas_.debugShoreMesh);
             window_.draw(terrainAtlas_.debugForestMesh);
             window_.draw(terrainAtlas_.debugHillsMesh);
+            if (hopZoneTintEnabled_) {
+                window_.draw(town_.hopDebugJunctionMesh);
+            } else {
+                window_.draw(town_.junctionMesh);
+            }
         }
+        drawRoadLabels();
         }
         window_.setView(window_.getDefaultView());
         hud_.draw(window_);

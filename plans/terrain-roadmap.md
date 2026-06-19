@@ -28,7 +28,7 @@ Split into **Step 1** (visual + bake) and **Step 1.5 / 1b** (topology + placemen
 
 | Task | Status |
 |------|--------|
-| Split `Road` at water + re-index junctions | Done (bridges: [`terrain-bridges.md`](terrain-bridges.md)) |
+| Split `Road` at water + re-index junctions | Done — `sanitizeRoadGraphAtWater` at load for Voronoi + corridor primaries ([`terrain-bridges.md`](terrain-bridges.md)) |
 | Cell boundary rebuild after split | Obsolete — road-only model removed cells |
 | `isBuildable()` in footprint/plot validation | Done — `polygonBuildable` corners + edges; terrain threaded from `BuildingPlacer::sync` |
 | Land-aware road bank inwards | Done — `assignRoadSideInwards(town, terrain)` disables water-facing banks |

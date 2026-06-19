@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -14,6 +16,7 @@ namespace {
 constexpr float kInteriorCrossEps = 0.03f;
 constexpr float kMinSegmentLen    = 0.5f;
 constexpr float kJunctionEps      = 0.08f;
+constexpr int   kBridgeSameSideMaxHops = 8;
 
 struct ParallelCullSettings {
     float probeOffset   = 4.f;
@@ -331,8 +334,10 @@ void probeChainForParallelRoads(const CorridorChain& chain, const Town& town,
 }
 
 struct BridgeSettings {
-    bool  snapEnabled   = true;
-    float searchRadius  = 8.f;
+    bool  snapEnabled    = true;
+    float searchRadius   = 8.f;
+    float maxSpan        = 80.f;
+    float outlineMaxDist = 6.f;
 };
 
 BridgeSettings resolveBridgeSettings(const Config& config) {
@@ -340,17 +345,147 @@ BridgeSettings resolveBridgeSettings(const Config& config) {
     settings.snapEnabled = config.terrain.bridgeSnapEnabled;
     settings.searchRadius =
         config.terrain.bridgeSnapSearchRadius > 0.f ? config.terrain.bridgeSnapSearchRadius : 8.f;
+    settings.maxSpan =
+        config.terrain.bridgeMaxSpan > 0.f ? config.terrain.bridgeMaxSpan : 80.f;
+    settings.outlineMaxDist =
+        config.terrain.bridgeOutlineMaxDist > 0.f ? config.terrain.bridgeOutlineMaxDist : 6.f;
     return settings;
 }
 
-bool roadEligibleForBridgeProcessing(const Road& road) {
-    if (road.isSecondary || road.isTerrainCorridor || road.isBridge) {
+void collectBoundarySplitParams(const Vec2& a, const Vec2& b, const TerrainAtlas& terrain,
+                                std::vector<float>& params);
+
+void updateJunctionPosition(Town& town, int junctionId, const Vec2& newPos);
+
+bool roadEligibleForWaterSanitize(const Road& road) {
+    if (road.isBridge || road.isSecondary) {
         return false;
     }
     if (road.length() < kMinSegmentLen) {
         return false;
     }
     return true;
+}
+
+int boundarySplitRoadsAtWater(Town& town, const TerrainAtlas& terrain) {
+    const int         roadCount = static_cast<int>(town.roads.size());
+    std::vector<Road> splitRoads;
+    splitRoads.reserve(static_cast<std::size_t>(roadCount) * 2);
+    int boundarySplits = 0;
+
+    for (int i = 0; i < roadCount; ++i) {
+        const Road& source = town.roads[static_cast<std::size_t>(i)];
+        if (!roadEligibleForWaterSanitize(source)) {
+            splitRoads.push_back(source);
+            continue;
+        }
+
+        const float len = source.length();
+        if (len < 1e-4f) {
+            splitRoads.push_back(source);
+            continue;
+        }
+
+        std::vector<float> params;
+        collectBoundarySplitParams(source.a, source.b, terrain, params);
+        boundarySplits += static_cast<int>(params.size()) - 2;
+
+        for (std::size_t p = 1; p < params.size(); ++p) {
+            const float t0 = params[p - 1];
+            const float t1 = params[p];
+            if ((t1 - t0) * len < kMinSegmentLen) {
+                continue;
+            }
+
+            Road segment = source;
+            segment.a    = lerpVec(source.a, source.b, t0);
+            segment.b    = lerpVec(source.a, source.b, t1);
+            resetRoadFrontage(segment);
+            splitRoads.push_back(segment);
+        }
+    }
+
+    for (std::size_t i = 0; i < splitRoads.size(); ++i) {
+        splitRoads[i].id = static_cast<int>(i);
+    }
+    town.roads = std::move(splitRoads);
+    return boundarySplits;
+}
+
+bool findFirstBuildableAlongRoad(const Vec2& endpoint, const Vec2& otherEnd,
+                                 const TerrainAtlas& terrain, Vec2& outLand) {
+    if (terrain.isBuildable(endpoint)) {
+        outLand = endpoint;
+        return true;
+    }
+
+    const Vec2  delta = otherEnd - endpoint;
+    const float len   = delta.length();
+    if (len < 1e-4f) {
+        return false;
+    }
+
+    const Vec2 dir = delta * (1.f / len);
+    constexpr float kStep = 0.25f;
+    for (float dist = kStep; dist <= len + 1e-3f; dist += kStep) {
+        const Vec2 point = endpoint + dir * dist;
+        if (terrain.isBuildable(point)) {
+            outLand = point;
+            return true;
+        }
+    }
+    return false;
+}
+
+int snapNonBuildableJunctions(Town& town, const TerrainAtlas& terrain) {
+    int snapped = 0;
+
+    for (const Junction& junction : town.junctions) {
+        if (terrain.isBuildable(junction.pos)) {
+            continue;
+        }
+
+        Vec2  bestLand{};
+        float bestDistSq = 1e30f;
+        bool  found      = false;
+
+        for (int roadId : junction.roadIds) {
+            if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+                continue;
+            }
+            const Road& road = town.roads[static_cast<std::size_t>(roadId)];
+            if (road.isBridge) {
+                continue;
+            }
+
+            Vec2 landPoint{};
+            if (nearPoint(road.a, junction.pos)) {
+                if (!findFirstBuildableAlongRoad(road.a, road.b, terrain, landPoint)) {
+                    continue;
+                }
+            } else if (nearPoint(road.b, junction.pos)) {
+                if (!findFirstBuildableAlongRoad(road.b, road.a, terrain, landPoint)) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            const float distSq = (landPoint - junction.pos).length() * (landPoint - junction.pos).length();
+            if (!found || distSq < bestDistSq) {
+                found      = true;
+                bestDistSq = distSq;
+                bestLand   = landPoint;
+            }
+        }
+
+        if (found) {
+            updateJunctionPosition(town, junction.id, bestLand);
+            ++snapped;
+        }
+    }
+
+    return snapped;
 }
 
 void collectBoundarySplitParams(const Vec2& a, const Vec2& b, const TerrainAtlas& terrain,
@@ -405,13 +540,42 @@ bool segmentEntirelyForbidden(const Vec2& a, const Vec2& b, const TerrainAtlas& 
         return false;
     }
 
+    int nonBuildable = 0;
+    int samples      = 0;
     for (float dist = step * 0.5f; dist < len - step * 0.5f; dist += step) {
         const float t = dist / len;
-        if (terrain.isBuildable(a + delta * t)) {
-            return false;
+        ++samples;
+        if (!terrain.isBuildable(a + delta * t)) {
+            ++nonBuildable;
         }
     }
-    return true;
+    if (samples == 0) {
+        return false;
+    }
+    return nonBuildable == samples;
+}
+
+bool segmentInteriorMostlyWater(const Vec2& a, const Vec2& b, const TerrainAtlas& terrain,
+                                float step = 0.25f) {
+    const Vec2  delta = b - a;
+    const float len   = delta.length();
+    if (len < 1e-4f) {
+        return false;
+    }
+
+    int nonBuildable = 0;
+    int samples      = 0;
+    for (float dist = step * 0.5f; dist < len - step * 0.5f; dist += step) {
+        const float t = dist / len;
+        ++samples;
+        if (!terrain.isBuildable(a + delta * t)) {
+            ++nonBuildable;
+        }
+    }
+    if (samples == 0) {
+        return false;
+    }
+    return nonBuildable >= samples - 1;
 }
 
 struct BoundaryFrame {
@@ -482,45 +646,143 @@ bool isLandRoad(const Road& road, const TerrainAtlas& terrain) {
     return terrain.isBuildable((road.a + road.b) * 0.5f);
 }
 
-bool isJunctionShore(const Vec2& pos, const TerrainAtlas& terrain) {
-    const BoundaryFrame frame  = nearestBoundaryFrame(pos, terrain);
-    const Vec2          inward = landwardInward(frame, terrain);
-    return isShorePoint(pos, inward, terrain);
+struct WaterBodyRef {
+    TerrainId   kind       = kTerrainUnknown;
+    std::size_t graphIndex = 0;
+    bool        valid      = false;
+
+    bool sameWaterBodyAs(const WaterBodyRef& other) const {
+        return valid && other.valid && kind == other.kind;
+    }
+};
+
+struct OutlineHit {
+    std::size_t graphIndex = 0;
+    Vec2        point{};
+    Vec2        tangent{};
+    float       dist = 1e30f;
+    bool        valid = false;
+};
+
+OutlineHit nearestOutlineFrame(const Vec2& p, const TerrainAtlas& terrain, TerrainId kind) {
+    OutlineHit best;
+    const std::vector<std::vector<Vec2>>* graphs = terrain.outlineGraphs(kind);
+    if (graphs == nullptr) {
+        return best;
+    }
+
+    for (std::size_t g = 0; g < graphs->size(); ++g) {
+        const std::vector<Vec2>& graph = (*graphs)[g];
+        if (graph.size() < 2) {
+            continue;
+        }
+        for (std::size_t i = 1; i < graph.size(); ++i) {
+            const Vec2& a = graph[i - 1];
+            const Vec2& b = graph[i];
+            const float dist = distancePointToSegment(p, a, b);
+            if (dist >= best.dist) {
+                continue;
+            }
+
+            const Vec2  ab    = b - a;
+            const float lenSq = ab.x * ab.x + ab.y * ab.y;
+            if (lenSq < 1e-8f) {
+                continue;
+            }
+            const float t =
+                std::clamp(((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / lenSq, 0.f, 1.f);
+            best.graphIndex = g;
+            best.point      = {a.x + ab.x * t, a.y + ab.y * t};
+            best.tangent    = ab.normalized();
+            best.dist       = dist;
+            best.valid      = true;
+        }
+    }
+    return best;
 }
 
-bool shouldStripWaterStub(const Road& road, const TerrainAtlas& terrain) {
-    if (!roadEligibleForBridgeProcessing(road)) {
+WaterBodyRef classifyJunctionWaterBody(const Vec2& pos, const TerrainAtlas& terrain,
+                                       float outlineMaxDist) {
+    WaterBodyRef ref;
+    if (terrain.catalog == nullptr) {
+        return ref;
+    }
+
+    const TerrainId seaId   = terrain.catalog->resolveKey("sea");
+    const TerrainId riverId = terrain.catalog->resolveKey("river");
+
+    const OutlineHit seaHit   = nearestOutlineFrame(pos, terrain, seaId);
+    const OutlineHit riverHit = nearestOutlineFrame(pos, terrain, riverId);
+
+    const OutlineHit* chosen = nullptr;
+    if (riverHit.valid && riverHit.dist <= outlineMaxDist) {
+        chosen = &riverHit;
+    } else if (seaHit.valid && seaHit.dist <= outlineMaxDist) {
+        chosen = &seaHit;
+    }
+    if (chosen == nullptr) {
+        return ref;
+    }
+
+    ref.kind       = (chosen == &seaHit) ? seaId : riverId;
+    ref.graphIndex = chosen->graphIndex;
+    ref.valid      = true;
+    return ref;
+}
+
+bool junctionHasLandRoad(const Town& town, int junctionId, const TerrainAtlas& terrain) {
+    if (junctionId < 0 || junctionId >= static_cast<int>(town.junctions.size())) {
+        return false;
+    }
+    for (int roadId : town.junctions[static_cast<std::size_t>(junctionId)].roadIds) {
+        if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+            continue;
+        }
+        if (isLandRoad(town.roads[static_cast<std::size_t>(roadId)], terrain)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct ShoreJunction {
+    int          junctionId = -1;
+    WaterBodyRef waterBody{};
+};
+
+Vec2 shoreLandwardFromOutline(const Vec2& junctionPos, const OutlineHit& hit,
+                              const TerrainAtlas& terrain) {
+    const Vec2 toJunction = junctionPos - hit.point;
+    if (toJunction.length() > 0.1f) {
+        return toJunction.normalized();
+    }
+
+    Vec2 inward = perpendicular(hit.tangent);
+    if (!terrain.isBuildable(hit.point + inward * 0.4f)) {
+        inward = inward * -1.f;
+    }
+    return inward;
+}
+
+bool areOppositeBanksForWater(const Vec2& posA, const Vec2& posB, TerrainId waterKind,
+                              const TerrainAtlas& terrain) {
+    const OutlineHit hitA = nearestOutlineFrame(posA, terrain, waterKind);
+    const OutlineHit hitB = nearestOutlineFrame(posB, terrain, waterKind);
+    if (!hitA.valid || !hitB.valid) {
         return false;
     }
 
-    const Vec2 mid = (road.a + road.b) * 0.5f;
-    if (terrain.isBuildable(mid)) {
-        return false;
-    }
+    const Vec2 inwardA = shoreLandwardFromOutline(posA, hitA, terrain);
+    const Vec2 inwardB = shoreLandwardFromOutline(posB, hitB, terrain);
 
-    const Vec2  delta = road.b - road.a;
-    const float len   = delta.length();
+    Vec2 ab = posB - posA;
+    const float len = ab.length();
     if (len < 1e-4f) {
-        return true;
+        return false;
     }
+    ab = ab * (1.f / len);
 
-    const Vec2 dir     = delta * (1.f / len);
-    const bool aShore  = isShorePoint(road.a, dir * -1.f, terrain);
-    const bool bShore  = isShorePoint(road.b, dir, terrain);
-    const bool aWater  = !aShore;
-    const bool bWater  = !bShore;
-
-    if (aWater && bWater) {
-        return true;
-    }
-    if (aShore && bWater) {
-        return true;
-    }
-    if (aWater && bShore) {
-        return true;
-    }
-
-    return true;
+    return ab.dot(inwardA) < -kOppositeBankEps && (ab * -1.f).dot(inwardB) < -kOppositeBankEps;
 }
 
 bool areOppositeBanks(const Vec2& posA, const Vec2& posB, const TerrainAtlas& terrain) {
@@ -567,6 +829,101 @@ struct BridgeCandidate {
     float length = 0.f;
 };
 
+int otherJunctionOnRoad(const Town& town, const Road& road, int junctionId) {
+    if (junctionId < 0 || junctionId >= static_cast<int>(town.junctions.size())) {
+        return -1;
+    }
+    const Vec2& jpos = town.junctions[static_cast<std::size_t>(junctionId)].pos;
+    if (nearPoint(road.a, jpos)) {
+        return findJunctionIndex(road.b, town.junctions);
+    }
+    if (nearPoint(road.b, jpos)) {
+        return findJunctionIndex(road.a, town.junctions);
+    }
+    return -1;
+}
+
+bool junctionsConnectedWithinHops(const Town& town, int fromId, int toId, int maxHops) {
+    if (fromId < 0 || toId < 0 || fromId >= static_cast<int>(town.junctions.size())
+        || toId >= static_cast<int>(town.junctions.size())) {
+        return false;
+    }
+    if (fromId == toId) {
+        return true;
+    }
+
+    std::vector<int> hopDist(static_cast<std::size_t>(town.junctions.size()), -1);
+    std::deque<int>  queue;
+    hopDist[static_cast<std::size_t>(fromId)] = 0;
+    queue.push_back(fromId);
+
+    while (!queue.empty()) {
+        const int cur = queue.front();
+        queue.pop_front();
+        const int curHops = hopDist[static_cast<std::size_t>(cur)];
+        if (curHops >= maxHops) {
+            continue;
+        }
+
+        for (int roadId : town.junctions[static_cast<std::size_t>(cur)].roadIds) {
+            if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
+                continue;
+            }
+            const Road& road = town.roads[static_cast<std::size_t>(roadId)];
+            if (road.isBridge) {
+                continue;
+            }
+            const int next = otherJunctionOnRoad(town, road, cur);
+            if (next < 0 || hopDist[static_cast<std::size_t>(next)] >= 0) {
+                continue;
+            }
+            const int nextHops = curHops + 1;
+            hopDist[static_cast<std::size_t>(next)] = nextHops;
+            if (next == toId) {
+                return true;
+            }
+            if (nextHops < maxHops) {
+                queue.push_back(next);
+            }
+        }
+    }
+
+    return false;
+}
+
+WaterBodyRef classifyShoreBridgeCandidate(const Junction& junction, const Town& town,
+                                          const TerrainAtlas& terrain,
+                                          const BridgeSettings& settings) {
+    WaterBodyRef ref =
+        classifyJunctionWaterBody(junction.pos, terrain, settings.outlineMaxDist);
+    if (ref.valid) {
+        return ref;
+    }
+    if (!junctionHasLandRoad(town, junction.id, terrain)) {
+        return ref;
+    }
+    // Sanitize insets shore stubs off the outline; allow a wider search.
+    const float extendedDist = std::max(settings.outlineMaxDist * 3.f, 24.f);
+    return classifyJunctionWaterBody(junction.pos, terrain, extendedDist);
+}
+
+bool shoresMayBridge(const ShoreJunction& a, const ShoreJunction& b, const Vec2& posA,
+                     const Vec2& posB, const TerrainAtlas& terrain) {
+    if (!a.waterBody.valid || !b.waterBody.valid) {
+        return false;
+    }
+    if (a.waterBody.sameWaterBodyAs(b.waterBody)) {
+        return true;
+    }
+    if (terrain.catalog == nullptr) {
+        return false;
+    }
+    const TerrainId riverId = terrain.catalog->resolveKey("river");
+    const TerrainId seaId   = terrain.catalog->resolveKey("sea");
+    return areOppositeBanksForWater(posA, posB, riverId, terrain)
+           || areOppositeBanksForWater(posA, posB, seaId, terrain);
+}
+
 bool findBestBridgeChord(const Vec2& shoreA, const Vec2& shoreB, const TerrainAtlas& terrain,
                          const BridgeSettings& settings, Vec2& outA, Vec2& outB) {
     const BoundaryFrame frameA = nearestBoundaryFrame(shoreA, terrain);
@@ -583,7 +940,7 @@ bool findBestBridgeChord(const Vec2& shoreA, const Vec2& shoreB, const TerrainAt
     outA           = shoreA;
     outB           = shoreB;
     float  bestLen = (outB - outA).length();
-    bool   found   = segmentEntirelyForbidden(outA, outB, terrain);
+    bool   found   = segmentInteriorMostlyWater(outA, outB, terrain);
 
     if (!settings.snapEnabled) {
         return found;
@@ -602,7 +959,7 @@ bool findBestBridgeChord(const Vec2& shoreA, const Vec2& shoreB, const TerrainAt
             if (!isShorePoint(candB, inwardB, terrain)) {
                 continue;
             }
-            if (!segmentEntirelyForbidden(candA, candB, terrain)) {
+            if (!segmentInteriorMostlyWater(candA, candB, terrain)) {
                 continue;
             }
             const float len = (candB - candA).length();
@@ -616,6 +973,90 @@ bool findBestBridgeChord(const Vec2& shoreA, const Vec2& shoreB, const TerrainAt
     }
 
     return found;
+}
+
+struct ShoreBridgeLookup {
+    std::vector<const ShoreJunction*> byJunctionId;
+};
+
+ShoreBridgeLookup buildShoreBridgeLookup(const std::vector<ShoreJunction>& shoreJunctions,
+                                         int junctionCount) {
+    ShoreBridgeLookup lookup;
+    lookup.byJunctionId.assign(static_cast<std::size_t>(junctionCount), nullptr);
+    for (const ShoreJunction& shore : shoreJunctions) {
+        if (shore.junctionId >= 0 && shore.junctionId < junctionCount) {
+            lookup.byJunctionId[static_cast<std::size_t>(shore.junctionId)] = &shore;
+        }
+    }
+    return lookup;
+}
+
+bool isValidBridgePair(int ja, int jb, const Town& town, const TerrainAtlas& terrain,
+                       const BridgeSettings& settings, const ShoreBridgeLookup& lookup) {
+    if (ja < 0 || jb < 0 || ja == jb || ja >= static_cast<int>(lookup.byJunctionId.size())
+        || jb >= static_cast<int>(lookup.byJunctionId.size())) {
+        return false;
+    }
+    const ShoreJunction* shoreA = lookup.byJunctionId[static_cast<std::size_t>(ja)];
+    const ShoreJunction* shoreB = lookup.byJunctionId[static_cast<std::size_t>(jb)];
+    if (shoreA == nullptr || shoreB == nullptr) {
+        return false;
+    }
+
+    const Vec2& posA = town.junctions[static_cast<std::size_t>(ja)].pos;
+    const Vec2& posB = town.junctions[static_cast<std::size_t>(jb)].pos;
+    if (!shoresMayBridge(*shoreA, *shoreB, posA, posB, terrain)) {
+        return false;
+    }
+    const float span = (posB - posA).length();
+    if (span > settings.maxSpan || span < kMinSegmentLen) {
+        return false;
+    }
+    if (junctionsConnectedWithinHops(town, ja, jb, kBridgeSameSideMaxHops)) {
+        return false;
+    }
+    return segmentInteriorMostlyWater(posA, posB, terrain);
+}
+
+float bridgePairSpan(const Town& town, int ja, int jb) {
+    const Vec2& posA = town.junctions[static_cast<std::size_t>(ja)].pos;
+    const Vec2& posB = town.junctions[static_cast<std::size_t>(jb)].pos;
+    return (posB - posA).length();
+}
+
+bool endpointHasBetterPendingPartner(int endpoint, int currentPartner, std::size_t currentIdx,
+                                     const std::vector<BridgeCandidate>& candidates,
+                                     const std::vector<char>& matched, const Town& town,
+                                     const TerrainAtlas& terrain, const BridgeSettings& settings,
+                                     const ShoreBridgeLookup& lookup) {
+    if (endpoint < 0 || currentPartner < 0) {
+        return false;
+    }
+
+    const float currentSep = bridgePairSpan(town, endpoint, currentPartner);
+
+    for (std::size_t j = currentIdx + 1; j < candidates.size(); ++j) {
+        const BridgeCandidate& future = candidates[j];
+        int                    other  = -1;
+        if (future.ja == endpoint) {
+            other = future.jb;
+        } else if (future.jb == endpoint) {
+            other = future.ja;
+        } else {
+            continue;
+        }
+        if (other == currentPartner || other < 0 || other >= static_cast<int>(matched.size())
+            || matched[static_cast<std::size_t>(other)] != 0) {
+            continue;
+        }
+        if (!isValidBridgePair(endpoint, other, town, terrain, settings, lookup)) {
+            continue;
+        }
+        if (bridgePairSpan(town, endpoint, other) < currentSep - 1e-3f) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -724,60 +1165,236 @@ void splitRoadsAtIntersections(Town& town, float endpointEps) {
     (void)endpointEps;
 }
 
-int splitRoadsAtForbiddenBoundary(Town& town, const TerrainAtlas& terrain) {
+void sanitizeRoadGraphAtWater(Town& town, const TerrainAtlas& terrain) {
     if (!terrain.valid) {
-        return 0;
+        return;
     }
 
-    const int        roadCount = static_cast<int>(town.roads.size());
-    std::vector<Road> splitRoads;
-    splitRoads.reserve(static_cast<std::size_t>(roadCount) * 2);
-    int boundarySplits = 0;
+    const int boundarySplits = boundarySplitRoadsAtWater(town, terrain);
 
-    for (int i = 0; i < roadCount; ++i) {
-        const Road& source = town.roads[static_cast<std::size_t>(i)];
-        if (!roadEligibleForBridgeProcessing(source)) {
-            splitRoads.push_back(source);
+    int removed         = 0;
+    int splitMultiland  = 0;
+    std::vector<Road> keptRoads;
+    keptRoads.reserve(town.roads.size());
+
+    for (const Road& source : town.roads) {
+        if (source.isBridge) {
+            keptRoads.push_back(source);
             continue;
         }
 
-        const float len = source.length();
+        const std::vector<std::pair<float, float>> intervals =
+            clipRoadSegmentToLand(source.a, source.b, terrain);
+        if (intervals.empty()) {
+            ++removed;
+            continue;
+        }
+
+        const Vec2 delta = source.b - source.a;
+        const float len  = delta.length();
         if (len < 1e-4f) {
-            splitRoads.push_back(source);
+            if (terrain.isBuildable(source.a)) {
+                keptRoads.push_back(source);
+            } else {
+                ++removed;
+            }
             continue;
         }
 
-        std::vector<float> params;
-        collectBoundarySplitParams(source.a, source.b, terrain, params);
-        boundarySplits += static_cast<int>(params.size()) - 2;
+        if (intervals.size() > 1) {
+            splitMultiland += static_cast<int>(intervals.size()) - 1;
+        }
 
-        for (std::size_t p = 1; p < params.size(); ++p) {
-            const float t0 = params[p - 1];
-            const float t1 = params[p];
-            if ((t1 - t0) * len < kMinSegmentLen) {
+        for (const auto& interval : intervals) {
+            Road segment = source;
+            segment.a    = source.a + delta * interval.first;
+            segment.b    = source.a + delta * interval.second;
+            resetRoadFrontage(segment);
+            if (segment.length() < kMinSegmentLen) {
+                ++removed;
                 continue;
             }
-
-            Road segment  = source;
-            segment.a     = lerpVec(source.a, source.b, t0);
-            segment.b     = lerpVec(source.a, source.b, t1);
-            resetRoadFrontage(segment);
-            splitRoads.push_back(segment);
+            keptRoads.push_back(segment);
         }
     }
 
-    if (boundarySplits == 0 && splitRoads.size() == town.roads.size()) {
-        Logger::log("voronoi", "boundary_splits=0");
-        return 0;
+    for (std::size_t i = 0; i < keptRoads.size(); ++i) {
+        keptRoads[i].id = static_cast<int>(i);
+    }
+    town.roads = std::move(keptRoads);
+
+    indexJunctions(town);
+
+    const int junctionsSnapped = snapNonBuildableJunctions(town, terrain);
+    if (junctionsSnapped > 0) {
+        indexJunctions(town);
     }
 
-    for (std::size_t i = 0; i < splitRoads.size(); ++i) {
-        splitRoads[i].id = static_cast<int>(i);
-    }
-    town.roads = std::move(splitRoads);
+    Logger::log("voronoi",
+                "water_sanitize boundary_splits=" + std::to_string(boundarySplits) + " removed="
+                    + std::to_string(removed) + " split_multiland=" + std::to_string(splitMultiland)
+                    + " junctions_snapped=" + std::to_string(junctionsSnapped));
+}
 
-    Logger::log("voronoi", "boundary_splits=" + std::to_string(boundarySplits));
-    return boundarySplits;
+int findUnionRoot(std::vector<int>& parent, int x) {
+    while (parent[static_cast<std::size_t>(x)] != x) {
+        parent[static_cast<std::size_t>(x)] =
+            parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
+        x = parent[static_cast<std::size_t>(x)];
+    }
+    return x;
+}
+
+void uniteUnion(std::vector<int>& parent, int a, int b) {
+    a = findUnionRoot(parent, a);
+    b = findUnionRoot(parent, b);
+    if (a != b) {
+        parent[static_cast<std::size_t>(b)] = a;
+    }
+}
+
+int removeDuplicateAndDegenerateRoads(Town& town) {
+    indexJunctions(town);
+
+    struct RoadKeep {
+        int   roadIndex = -1;
+        float length    = 0.f;
+    };
+    std::map<std::pair<int, int>, RoadKeep> bestForPair;
+    std::vector<bool>                         keepRoad(town.roads.size(), false);
+    int                                       removed = 0;
+
+    auto recordPair = [&](int roadIndex, int ja, int jb, float len) {
+        if (ja < 0 || jb < 0 || ja == jb) {
+            ++removed;
+            return;
+        }
+        const int lo = std::min(ja, jb);
+        const int hi = std::max(ja, jb);
+        const std::pair<int, int> key{lo, hi};
+        RoadKeep&                 slot = bestForPair[key];
+        if (slot.roadIndex < 0 || len > slot.length) {
+            if (slot.roadIndex >= 0) {
+                keepRoad[static_cast<std::size_t>(slot.roadIndex)] = false;
+                ++removed;
+            }
+            slot.roadIndex = roadIndex;
+            slot.length    = len;
+            keepRoad[static_cast<std::size_t>(roadIndex)] = true;
+        } else {
+            ++removed;
+        }
+    };
+
+    for (std::size_t i = 0; i < town.roads.size(); ++i) {
+        const Road& road = town.roads[i];
+        const float len  = road.length();
+        if (len < kMinSegmentLen) {
+            ++removed;
+            continue;
+        }
+        recordPair(static_cast<int>(i), road.junctionA, road.junctionB, len);
+    }
+
+    std::vector<Road> keptRoads;
+    keptRoads.reserve(town.roads.size());
+    for (std::size_t i = 0; i < town.roads.size(); ++i) {
+        if (keepRoad[i]) {
+            keptRoads.push_back(town.roads[i]);
+        }
+    }
+    for (std::size_t i = 0; i < keptRoads.size(); ++i) {
+        keptRoads[i].id = static_cast<int>(i);
+    }
+    town.roads = std::move(keptRoads);
+    indexJunctions(town);
+    return removed;
+}
+
+void mergeWatersideJunctions(Town& town, const TerrainAtlas& terrain, const Config& config) {
+    const float mergeDist = config.terrain.shoreJunctionMergeDist;
+    if (!terrain.valid || mergeDist <= 0.f) {
+        return;
+    }
+
+    indexJunctions(town);
+
+    const BridgeSettings settings = resolveBridgeSettings(config);
+
+    std::vector<int> shoreIds;
+    shoreIds.reserve(town.junctions.size());
+    for (const Junction& junction : town.junctions) {
+        const WaterBodyRef waterBody =
+            classifyShoreBridgeCandidate(junction, town, terrain, settings);
+        if (!waterBody.valid || !junctionHasLandRoad(town, junction.id, terrain)) {
+            continue;
+        }
+        shoreIds.push_back(junction.id);
+    }
+
+    if (shoreIds.size() < 2) {
+        return;
+    }
+
+    const int junctionCount = static_cast<int>(town.junctions.size());
+    std::vector<int> parent(static_cast<std::size_t>(junctionCount));
+    for (int i = 0; i < junctionCount; ++i) {
+        parent[static_cast<std::size_t>(i)] = i;
+    }
+
+    const float mergeDistSq = mergeDist * mergeDist;
+    for (std::size_t i = 0; i < shoreIds.size(); ++i) {
+        const Vec2& posI = town.junctions[static_cast<std::size_t>(shoreIds[i])].pos;
+        for (std::size_t j = i + 1; j < shoreIds.size(); ++j) {
+            const Vec2 delta = posI - town.junctions[static_cast<std::size_t>(shoreIds[j])].pos;
+            if (delta.dot(delta) <= mergeDistSq) {
+                uniteUnion(parent, shoreIds[i], shoreIds[j]);
+            }
+        }
+    }
+
+    std::vector<std::vector<int>> byRoot(static_cast<std::size_t>(junctionCount));
+    for (int shoreId : shoreIds) {
+        byRoot[static_cast<std::size_t>(findUnionRoot(parent, shoreId))].push_back(shoreId);
+    }
+
+    int mergedJunctions = 0;
+    int clustersMerged  = 0;
+    for (int root = 0; root < junctionCount; ++root) {
+        const std::vector<int>& cluster = byRoot[static_cast<std::size_t>(root)];
+        if (cluster.size() < 2) {
+            continue;
+        }
+        ++clustersMerged;
+
+        Vec2 centroid{0.f, 0.f};
+        for (int junctionId : cluster) {
+            const Vec2& pos = town.junctions[static_cast<std::size_t>(junctionId)].pos;
+            centroid.x += pos.x;
+            centroid.y += pos.y;
+        }
+        const float invCount = 1.f / static_cast<float>(cluster.size());
+        centroid.x *= invCount;
+        centroid.y *= invCount;
+
+        for (int junctionId : cluster) {
+            updateJunctionPosition(town, junctionId, centroid);
+        }
+        mergedJunctions += static_cast<int>(cluster.size()) - 1;
+    }
+
+    if (clustersMerged == 0) {
+        return;
+    }
+
+    indexJunctions(town);
+    const int removedRoads = removeDuplicateAndDegenerateRoads(town);
+
+    Logger::log("voronoi",
+                "shore_junction_merge clusters=" + std::to_string(clustersMerged)
+                    + " merged_junctions=" + std::to_string(mergedJunctions) + " removed_roads="
+                    + std::to_string(removedRoads) + " merge_dist="
+                    + std::to_string(mergeDist));
 }
 
 void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& config) {
@@ -786,116 +1403,138 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
     }
 
     indexJunctions(town);
+    town.bridgeCandidateJunctionIds.clear();
 
     const BridgeSettings settings = resolveBridgeSettings(config);
 
-    std::vector<Road> keptRoads;
-    keptRoads.reserve(town.roads.size());
-    int waterStubsRemoved = 0;
-
-    for (const Road& road : town.roads) {
-        if (shouldStripWaterStub(road, terrain)) {
-            ++waterStubsRemoved;
-            continue;
-        }
-        keptRoads.push_back(road);
-    }
-
-    for (std::size_t i = 0; i < keptRoads.size(); ++i) {
-        keptRoads[i].id = static_cast<int>(i);
-    }
-    town.roads = std::move(keptRoads);
-    indexJunctions(town);
-
-    std::vector<int> shoreJunctions;
+    std::vector<ShoreJunction> shoreJunctions;
     shoreJunctions.reserve(town.junctions.size());
 
     for (const Junction& junction : town.junctions) {
-        if (!isJunctionShore(junction.pos, terrain)) {
+        const WaterBodyRef waterBody =
+            classifyShoreBridgeCandidate(junction, town, terrain, settings);
+        if (!waterBody.valid) {
             continue;
         }
-
-        bool hasLandRoad = false;
-        for (int roadId : junction.roadIds) {
-            if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())) {
-                continue;
-            }
-            if (isLandRoad(town.roads[static_cast<std::size_t>(roadId)], terrain)) {
-                hasLandRoad = true;
-                break;
-            }
+        if (!junctionHasLandRoad(town, junction.id, terrain)) {
+            continue;
         }
+        shoreJunctions.push_back({junction.id, waterBody});
+        town.bridgeCandidateJunctionIds.insert(junction.id);
+    }
 
-        if (hasLandRoad) {
-            shoreJunctions.push_back(junction.id);
+    int shoreSea   = 0;
+    int shoreRiver = 0;
+    for (const ShoreJunction& shore : shoreJunctions) {
+        if (terrain.catalog != nullptr && shore.waterBody.kind == terrain.catalog->resolveKey("sea")) {
+            ++shoreSea;
+        } else if (terrain.catalog != nullptr
+                   && shore.waterBody.kind == terrain.catalog->resolveKey("river")) {
+            ++shoreRiver;
         }
     }
 
     std::vector<BridgeCandidate> candidates;
+    candidates.reserve(shoreJunctions.size() * shoreJunctions.size());
+    int rejectedBody     = 0;
+    int rejectedSpan     = 0;
+    int rejectedSameSide = 0;
+    int rejectedNotWater = 0;
     for (std::size_t i = 0; i < shoreJunctions.size(); ++i) {
-        const int   ja   = shoreJunctions[i];
+        const int   ja   = shoreJunctions[i].junctionId;
         const Vec2& posA = town.junctions[static_cast<std::size_t>(ja)].pos;
         for (std::size_t j = i + 1; j < shoreJunctions.size(); ++j) {
-            const int   jb   = shoreJunctions[j];
+            const int   jb   = shoreJunctions[j].junctionId;
             const Vec2& posB = town.junctions[static_cast<std::size_t>(jb)].pos;
-            if (!areOppositeBanks(posA, posB, terrain)) {
+            if (!shoresMayBridge(shoreJunctions[i], shoreJunctions[j], posA, posB, terrain)) {
+                ++rejectedBody;
                 continue;
             }
-            if (!segmentEntirelyForbidden(posA, posB, terrain)) {
+            const float span = (posB - posA).length();
+            if (span > settings.maxSpan || span < kMinSegmentLen) {
+                ++rejectedSpan;
                 continue;
             }
-            candidates.push_back({ja, jb, (posB - posA).length()});
+            if (junctionsConnectedWithinHops(town, ja, jb, kBridgeSameSideMaxHops)) {
+                ++rejectedSameSide;
+                continue;
+            }
+            if (!segmentInteriorMostlyWater(posA, posB, terrain)) {
+                ++rejectedNotWater;
+                continue;
+            }
+            candidates.push_back({ja, jb, span});
         }
     }
 
     std::sort(candidates.begin(), candidates.end(),
               [](const BridgeCandidate& a, const BridgeCandidate& b) { return a.length < b.length; });
 
-    std::vector<char> junctionMatched(town.junctions.size(), 0);
-    std::vector<BridgeCandidate> matchedPairs;
-    matchedPairs.reserve(candidates.size());
+    const ShoreBridgeLookup lookup = buildShoreBridgeLookup(shoreJunctions,
+                                                              static_cast<int>(town.junctions.size()));
 
-    for (const BridgeCandidate& candidate : candidates) {
-        if (candidate.ja < 0 || candidate.jb < 0
-            || candidate.ja >= static_cast<int>(junctionMatched.size())
-            || candidate.jb >= static_cast<int>(junctionMatched.size())) {
-            continue;
-        }
-        if (junctionMatched[static_cast<std::size_t>(candidate.ja)] != 0
-            || junctionMatched[static_cast<std::size_t>(candidate.jb)] != 0) {
-            continue;
-        }
-        junctionMatched[static_cast<std::size_t>(candidate.ja)] = 1;
-        junctionMatched[static_cast<std::size_t>(candidate.jb)] = 1;
-        matchedPairs.push_back(candidate);
-    }
+    std::vector<char> junctionMatched(town.junctions.size(), 0);
 
     int bridgesCreated = 0;
     int bridgesSnapped = 0;
+    int rejectedSnap   = 0;
+    int deferred       = 0;
 
-    for (const BridgeCandidate& pair : matchedPairs) {
-        const Vec2 origA = town.junctions[static_cast<std::size_t>(pair.ja)].pos;
-        const Vec2 origB = town.junctions[static_cast<std::size_t>(pair.jb)].pos;
+    constexpr int kMaxBridgePasses = 64;
+    for (int pass = 0; pass < kMaxBridgePasses; ++pass) {
+        bool progress = false;
+        for (std::size_t i = 0; i < candidates.size(); ++i) {
+            const BridgeCandidate& candidate = candidates[i];
+            if (candidate.ja < 0 || candidate.jb < 0
+                || candidate.ja >= static_cast<int>(junctionMatched.size())
+                || candidate.jb >= static_cast<int>(junctionMatched.size())) {
+                continue;
+            }
+            if (junctionMatched[static_cast<std::size_t>(candidate.ja)] != 0
+                || junctionMatched[static_cast<std::size_t>(candidate.jb)] != 0) {
+                continue;
+            }
 
-        Vec2 bridgeA = origA;
-        Vec2 bridgeB = origB;
-        if (!findBestBridgeChord(origA, origB, terrain, settings, bridgeA, bridgeB)) {
-            continue;
+            if (endpointHasBetterPendingPartner(candidate.jb, candidate.ja, i, candidates,
+                                                junctionMatched, town, terrain, settings, lookup)
+                || endpointHasBetterPendingPartner(candidate.ja, candidate.jb, i, candidates,
+                                                   junctionMatched, town, terrain, settings,
+                                                   lookup)) {
+                ++deferred;
+                continue;
+            }
+
+            const Vec2 origA = town.junctions[static_cast<std::size_t>(candidate.ja)].pos;
+            const Vec2 origB = town.junctions[static_cast<std::size_t>(candidate.jb)].pos;
+
+            Vec2 bridgeA = origA;
+            Vec2 bridgeB = origB;
+            if (!findBestBridgeChord(origA, origB, terrain, settings, bridgeA, bridgeB)) {
+                ++rejectedSnap;
+                continue;
+            }
+
+            junctionMatched[static_cast<std::size_t>(candidate.ja)] = 1;
+            junctionMatched[static_cast<std::size_t>(candidate.jb)] = 1;
+
+            const bool snapped = !nearPoint(bridgeA, origA) || !nearPoint(bridgeB, origB);
+            updateJunctionPosition(town, candidate.ja, bridgeA);
+            updateJunctionPosition(town, candidate.jb, bridgeB);
+
+            Road bridge;
+            bridge.id       = static_cast<int>(town.roads.size());
+            bridge.a        = bridgeA;
+            bridge.b        = bridgeB;
+            bridge.isBridge = true;
+            town.roads.push_back(bridge);
+            ++bridgesCreated;
+            if (snapped) {
+                ++bridgesSnapped;
+            }
+            progress = true;
         }
-
-        const bool snapped = !nearPoint(bridgeA, origA) || !nearPoint(bridgeB, origB);
-        updateJunctionPosition(town, pair.ja, bridgeA);
-        updateJunctionPosition(town, pair.jb, bridgeB);
-
-        Road bridge;
-        bridge.id        = static_cast<int>(town.roads.size());
-        bridge.a         = bridgeA;
-        bridge.b         = bridgeB;
-        bridge.isBridge  = true;
-        town.roads.push_back(bridge);
-        ++bridgesCreated;
-        if (snapped) {
-            ++bridgesSnapped;
+        if (!progress) {
+            break;
         }
     }
 
@@ -904,11 +1543,20 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
     }
     indexJunctions(town);
 
-    Logger::log("voronoi", "water_stubs_removed=" + std::to_string(waterStubsRemoved)
-                                + " shore_junctions=" + std::to_string(shoreJunctions.size())
-                                + " bridge_pairs_matched=" + std::to_string(matchedPairs.size())
-                                + " bridges_created=" + std::to_string(bridgesCreated)
-                                + " bridges_snapped=" + std::to_string(bridgesSnapped));
+    Logger::log("voronoi",
+                "bridge_candidates=" + std::to_string(candidates.size()) + " created="
+                    + std::to_string(bridgesCreated) + " snapped="
+                    + std::to_string(bridgesSnapped) + " max_span="
+                    + std::to_string(settings.maxSpan) + " shore_junctions="
+                    + std::to_string(shoreJunctions.size()) + " shore_sea="
+                    + std::to_string(shoreSea) + " shore_river="
+                    + std::to_string(shoreRiver) + " reject_body="
+                    + std::to_string(rejectedBody) + " reject_span="
+                    + std::to_string(rejectedSpan) + " reject_same_side="
+                    + std::to_string(rejectedSameSide) + " reject_not_water="
+                    + std::to_string(rejectedNotWater) + " reject_snap="
+                    + std::to_string(rejectedSnap) + " deferred="
+                    + std::to_string(deferred));
 }
 
 void cullVoronoiRoadsParallelToCorridors(Town& town, const Config& config) {

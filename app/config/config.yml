@@ -42,6 +42,9 @@ terrain:
   corridor_parallel_probe_offset: 4.0
   corridor_parallel_cos: 0.98
   bridges_enabled: true
+  bridge_max_span: 180.0
+  bridge_outline_max_dist: 8.0
+  shore_junction_merge_dist: 2.0   # merge nearby waterside junctions after sanitize (0 = off)
   bridge_snap_enabled: true
   bridge_snap_search_radius: 8.0
 
@@ -85,6 +88,6 @@ logging:
 growth:
   auto_grow: 0
   auto_grow_ms: 50  # one building request per interval when using --auto-grow
-  auto_exit: false
+  auto_exit: false  # true or CLI --auto-exit: quit after town load; with --auto-grow, quit when target reached
   profile: false
   verbose_placement_logs: false
