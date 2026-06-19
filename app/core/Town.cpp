@@ -756,6 +756,7 @@ void removeSecondaryRoadAtQueueIndex(Town& town, int queueIndex) {
 void ensurePlacementSyncMins(Town& town, const PlacementFloors& floors, const TownConfig& townCfg,
                              float frontageSetback) {
     town.syncMinPlotFrontage  = floors.minPlotFrontage;
+    town.syncMinPlotDepth     = floors.minPlotDepth;
     town.syncMinGapWidth      = floors.minGapWidth;
     town.syncMinAlleyGapWidth = townCfg.minWallGapForAlley;
     town.syncBorderOutlineProbeMaxDist = townCfg.borderOutlineProbeMaxDist;

@@ -33,12 +33,19 @@ Plots exist only after placement — there is no pre-generated lot mesh.
 **Depth cap** for plot candidates (`maxPlotDepthToRoadHit`):
 
 ```text
-roadCap     = nearest inward ray hit to another road / 2
-outlineCap  = nearest inward ray hit to sea/river outline (full distance)
-maxDepth    = min(roadCap, outlineCap)   — omit a term when that hit is missing
+syncMinPlotDepth = min depth for smallest plot_sizes band (both orientations)
+
+road corridor width D to nearest other road:
+  if D/2 >= syncMinPlotDepth     → roadCap = D/2
+  else if D >= syncMinPlotDepth  → narrow strip: lower (roadId, bankIndex) gets D, facing bank gets 0
+  else                           → roadCap = 0
+
+outlineCap = nearest sea/river outline hit (full distance, no halving)
+
+maxDepth = min(roadCap, outlineCap)   — omit a term when that hit is missing
 ```
 
-Host road excluded from road probes. Outline uses `Town.syncTerrainProbes.borderIds` and `syncTerrainAtlas`. Bridges, corridors, and alleys block road rays.
+Host road excluded from road probes. Outline uses `Town.syncTerrainProbes.borderIds` and `syncTerrainAtlas`. `syncMinPlotDepth` and `syncMinPlotFrontage` set from [`PlacementFloors`](../../app/core/PlacementFloors.cpp) at sync.
 
 **Building footprints** must be orthogonal rectangles (`footprintHasRightAngles` in `PlotGeometry.cpp`).
 

@@ -306,6 +306,7 @@ struct Town {
     std::vector<SecondaryRoadRecord> secondaryRoadRecords;
     std::vector<int>                 secondaryRoadIds;
     float             syncMinPlotFrontage   = 0.f;
+    float             syncMinPlotDepth      = 0.f;
     float             syncMinGapWidth       = 0.f;
     float             syncMinAlleyGapWidth  = 0.f;
     float             syncBorderOutlineProbeMaxDist = 20.f;

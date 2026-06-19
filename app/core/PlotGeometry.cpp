@@ -474,9 +474,79 @@ float nearestOutlineHitAtSample(const Vec2& sample, const Vec2& inward, const To
     return best;
 }
 
+bool narrowStripHostWins(int hostRoadId, int hostBankIndex, int blockRoadId, int blockBankIndex) {
+    if (hostRoadId != blockRoadId) {
+        return hostRoadId < blockRoadId;
+    }
+    return hostBankIndex < blockBankIndex;
+}
+
+int facingBankTowardSample(const Road& blockRoad, const Vec2& fromSample, const Vec2& hitPoint) {
+    Vec2 towardHost = fromSample - hitPoint;
+    if (towardHost.length() < 1e-4f) {
+        return 0;
+    }
+    towardHost = towardHost.normalized();
+
+    int   bestBank = 0;
+    float bestDot  = -1e30f;
+    for (int bankIndex = 0; bankIndex < 2; ++bankIndex) {
+        const RoadSideFrontage* side = blockRoad.sideBank(bankIndex);
+        if (side == nullptr || side->inward.length() < 1e-4f) {
+            continue;
+        }
+        const float face = side->inward.normalized().dot(towardHost);
+        if (face > bestDot) {
+            bestDot  = face;
+            bestBank = bankIndex;
+        }
+    }
+    return bestBank;
+}
+
+float roadDepthCapAtSample(const Vec2& sample, const Vec2& unitInward, int hostRoadId,
+                           int hostBankIndex, const Town& town) {
+    float nearestDist = std::numeric_limits<float>::max();
+    int   blockRoadId = -1;
+    for (const Road& road : town.roads) {
+        if (road.id == hostRoadId) {
+            continue;
+        }
+        const float hit = raySegmentHitDist(sample, unitInward, road.a, road.b, kDepthRayMax);
+        if (hit > kDepthHitEps && hit < nearestDist) {
+            nearestDist = hit;
+            blockRoadId = road.id;
+        }
+    }
+    if (nearestDist >= std::numeric_limits<float>::max() || blockRoadId < 0
+        || blockRoadId >= static_cast<int>(town.roads.size())) {
+        return std::numeric_limits<float>::max();
+    }
+
+    const float minDepth = town.syncMinPlotDepth;
+    if (minDepth <= 1e-3f) {
+        return nearestDist * 0.5f;
+    }
+
+    if (nearestDist * 0.5f + 1e-3f >= minDepth) {
+        return nearestDist * 0.5f;
+    }
+    if (nearestDist + 1e-3f < minDepth) {
+        return 0.f;
+    }
+
+    const Road& blockRoad = town.roads[static_cast<std::size_t>(blockRoadId)];
+    const Vec2  hitPoint  = sample + unitInward * nearestDist;
+    const int   blockBank = facingBankTowardSample(blockRoad, sample, hitPoint);
+    if (narrowStripHostWins(hostRoadId, hostBankIndex, blockRoadId, blockBank)) {
+        return nearestDist;
+    }
+    return 0.f;
+}
+
 float maxPlotDepthToRoadHitImpl(const Vec2& roadStart, const Vec2& edgeDir, float frontage,
                                 const Vec2& inward, float setback, int hostRoadId,
-                                const Town& town) {
+                                int hostBankIndex, const Town& town) {
     if (frontage < 1e-3f || inward.length() < 1e-4f) {
         return 0.f;
     }
@@ -491,22 +561,14 @@ float maxPlotDepthToRoadHitImpl(const Vec2& roadStart, const Vec2& edgeDir, floa
 
     const Vec2 unitInward = inward.normalized();
     for (const Vec2& sample : samples) {
-        for (const Road& road : town.roads) {
-            if (road.id == hostRoadId) {
-                continue;
-            }
-            const float hit =
-                raySegmentHitDist(sample, unitInward, road.a, road.b, kDepthRayMax);
-            if (hit > kDepthHitEps) {
-                roadBest = std::min(roadBest, hit);
-            }
-        }
+        roadBest    = std::min(roadBest, roadDepthCapAtSample(sample, unitInward, hostRoadId,
+                                                              hostBankIndex, town));
         outlineBest = std::min(outlineBest, nearestOutlineHitAtSample(sample, inward, town));
     }
 
     float cap = 0.f;
     if (roadBest < std::numeric_limits<float>::max()) {
-        cap = roadBest * 0.5f;
+        cap = roadBest;
     }
     if (outlineBest < std::numeric_limits<float>::max()) {
         const float outlineCap = outlineBest;
@@ -522,13 +584,13 @@ float maxPlotDepthToRoadHit(const Vec2& roadStart, const Vec2& edgeDir, float fr
                             Town& town) {
     if (hostRoadId < 0 || hostRoadId >= static_cast<int>(town.roads.size())) {
         return maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback, hostRoadId,
-                                       town);
+                                         bankIndex, town);
     }
 
     RoadSideFrontage* side = town.roads[static_cast<std::size_t>(hostRoadId)].sideBank(bankIndex);
     if (side == nullptr) {
         return maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback, hostRoadId,
-                                       town);
+                                         bankIndex, town);
     }
 
     if (side->depthCacheTopologyGen != town.roadTopologyGeneration) {
@@ -542,7 +604,7 @@ float maxPlotDepthToRoadHit(const Vec2& roadStart, const Vec2& edgeDir, float fr
     if (!roadFrameForBank(town.roads[static_cast<std::size_t>(hostRoadId)], bankIndex, origin,
                           farEnd, edgeDirFrame)) {
         return maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback, hostRoadId,
-                                       town);
+                                         bankIndex, town);
     }
 
     const float tAlong = (roadStart - origin).dot(edgeDirFrame);
@@ -553,8 +615,8 @@ float maxPlotDepthToRoadHit(const Vec2& roadStart, const Vec2& edgeDir, float fr
         return found->second;
     }
 
-    const float result =
-        maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback, hostRoadId, town);
+    const float result = maxPlotDepthToRoadHitImpl(roadStart, edgeDir, frontage, inward, setback,
+                                                   hostRoadId, bankIndex, town);
     side->depthCacheEntries[key] = result;
     return result;
 }

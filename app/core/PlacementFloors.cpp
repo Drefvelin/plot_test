@@ -19,6 +19,7 @@ PlacementFloors PlacementFloors::fromDefs(const DefCache& defs, float maxDepthTo
     if (minPlotArea < std::numeric_limits<float>::max() && maxDepthToFrontRatio > 1e-6f) {
         floors.minPlotFrontage = std::max(1.f, std::sqrt(minPlotArea / maxDepthToFrontRatio));
     }
+    floors.minPlotDepth = minPlotDepthForSmallestPlot(defs, maxDepthToFrontRatio);
 
     float minBuildingArea = std::numeric_limits<float>::max();
     for (const auto& [name, band] : defs.buildingSizes()) {

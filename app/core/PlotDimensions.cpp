@@ -219,6 +219,31 @@ PlotDimensions computePlotDimensionsForRoad(const DefCache& defs, const std::str
                              maxDepthToFrontRatio, orient, rejectOut, plotAreaBand);
 }
 
+float minPlotDepthForSmallestPlot(const DefCache& defs, float maxDepthToFrontRatio) {
+    float minDepth = std::numeric_limits<float>::max();
+    constexpr float kHuge = 1e6f;
+    for (const auto& [name, band] : defs.plotSizes()) {
+        (void)name;
+        if (band.minArea <= 0.f) {
+            continue;
+        }
+        for (const PlotOrientation orient :
+             {PlotOrientation::Horizontal, PlotOrientation::Vertical}) {
+            DimReject      reject = DimReject::None;
+            PlotDimensions dims   = computePlotDimensionsAtArea(band, band.minArea, kHuge, kHuge,
+                                                                maxDepthToFrontRatio, orient,
+                                                                &reject);
+            if (dims.valid) {
+                minDepth = std::min(minDepth, dims.depth);
+            }
+        }
+    }
+    if (minDepth >= std::numeric_limits<float>::max()) {
+        return 0.f;
+    }
+    return std::max(1.f, minDepth);
+}
+
 const char* rejectName(DimReject reason) {
     switch (reason) {
     case DimReject::MissingBand:

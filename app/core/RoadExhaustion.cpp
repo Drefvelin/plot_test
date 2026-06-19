@@ -117,6 +117,7 @@ void clearAllRoadExhaustion(Town& town) {
 void initRoadExhaustionForSync(Town& town, const PlacementFloors& floors,
                                const TownConfig& townCfg) {
     town.syncMinPlotFrontage  = floors.minPlotFrontage;
+    town.syncMinPlotDepth     = floors.minPlotDepth;
     town.syncMinGapWidth      = floors.minGapWidth;
     town.syncMinAlleyGapWidth = townCfg.minWallGapForAlley;
     clearAllRoadExhaustion(town);

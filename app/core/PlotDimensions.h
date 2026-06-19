@@ -46,3 +46,4 @@ PlotDimensions computePlotDimensionsForRoad(const DefCache& defs, const std::str
                                             DimReject* rejectOut = nullptr,
                                             const SizeBand* plotAreaBand = nullptr);
 const char* rejectName(DimReject reason);
+float minPlotDepthForSmallestPlot(const DefCache& defs, float maxDepthToFrontRatio);

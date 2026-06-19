@@ -18,7 +18,7 @@ Road banks expose plot slots; placement carves them and creates road-facing lots
 |---------|--------|
 | Setback | `plots.frontage_setback` (config) |
 | Area bounds | `plots.min_area` / `max_area` + per-type `plot_sizes` in buildings.yml |
-| Depth cap | `maxPlotDepthToRoadHit` — min of nearest **other-road hit / 2** and nearest **terrain outline hit** (full distance, no halving). Outline probes use `syncTerrainProbes.borderIds` (sea/river). Lazy memo on `RoadSideFrontage`. |
+| Depth cap | `maxPlotDepthToRoadHit` — per sample, ray inward for nearest other-road hit and nearest sea/river outline. **Road:** if corridor width `D / 2 >= syncMinPlotDepth`, cap = `D / 2`; else if `D >= syncMinPlotDepth` (narrow strip), **one bank wins** full `D` (lower `(roadId, bankIndex)` lexicographic), the facing bank gets **0** from that road pair. **Outline:** full distance (no halving). Result = min of applicable road and outline caps. `syncMinPlotDepth` from smallest `plot_sizes` band. Lazy memo on `RoadSideFrontage`. |
 | Buildability | `polygonBuildable()` — corners + edge samples |
 | Footprints | Orthogonal rectangles only; `footprintPlacementValid` after layout |
 
