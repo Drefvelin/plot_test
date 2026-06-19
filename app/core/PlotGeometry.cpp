@@ -449,6 +449,31 @@ WallGap wallGapFromSegment(const Road& road, int bankIndex, const RoadFrontageSe
 
 namespace {
 
+constexpr float kDepthRayMax = 512.f;
+constexpr float kDepthHitEps = 0.25f;
+
+float nearestOutlineHitAtSample(const Vec2& sample, const Vec2& inward, const Town& town) {
+    const TerrainAtlas* terrain = town.syncTerrainAtlas;
+    if (terrain == nullptr || !terrain->valid || inward.length() < 1e-4f) {
+        return std::numeric_limits<float>::max();
+    }
+
+    float best = std::numeric_limits<float>::max();
+    for (TerrainId kind : town.syncTerrainProbes.borderIds) {
+        if (!terrain->hasOutline(kind)) {
+            continue;
+        }
+        OutlineRayHit hit{};
+        if (!rayHitPreferOutline(sample, inward, kind, *terrain, kDepthRayMax, hit)) {
+            continue;
+        }
+        if (hit.dist > kDepthHitEps) {
+            best = std::min(best, hit.dist);
+        }
+    }
+    return best;
+}
+
 float maxPlotDepthToRoadHitImpl(const Vec2& roadStart, const Vec2& edgeDir, float frontage,
                                 const Vec2& inward, float setback, int hostRoadId,
                                 const Town& town) {
@@ -456,29 +481,38 @@ float maxPlotDepthToRoadHitImpl(const Vec2& roadStart, const Vec2& edgeDir, floa
         return 0.f;
     }
 
-    float best = std::numeric_limits<float>::max();
+    float roadBest    = std::numeric_limits<float>::max();
+    float outlineBest = std::numeric_limits<float>::max();
     const Vec2 samples[] = {
         roadStart + inward * setback,
         roadStart + edgeDir * (frontage * 0.5f) + inward * setback,
         roadStart + edgeDir * frontage + inward * setback,
     };
 
+    const Vec2 unitInward = inward.normalized();
     for (const Vec2& sample : samples) {
         for (const Road& road : town.roads) {
             if (road.id == hostRoadId) {
                 continue;
             }
-            const float hit = raySegmentHitDist(sample, inward.normalized(), road.a, road.b, 512.f);
-            if (hit > 0.25f) {
-                best = std::min(best, hit);
+            const float hit =
+                raySegmentHitDist(sample, unitInward, road.a, road.b, kDepthRayMax);
+            if (hit > kDepthHitEps) {
+                roadBest = std::min(roadBest, hit);
             }
         }
+        outlineBest = std::min(outlineBest, nearestOutlineHitAtSample(sample, inward, town));
     }
 
-    if (best == std::numeric_limits<float>::max()) {
-        return 0.f;
+    float cap = 0.f;
+    if (roadBest < std::numeric_limits<float>::max()) {
+        cap = roadBest * 0.5f;
     }
-    return best * 0.5f;
+    if (outlineBest < std::numeric_limits<float>::max()) {
+        const float outlineCap = outlineBest;
+        cap = cap > 1e-3f ? std::min(cap, outlineCap) : outlineCap;
+    }
+    return cap;
 }
 
 }  // namespace

@@ -1,0 +1,41 @@
+---
+description: Keep docs/ in sync when architecture or features change
+alwaysApply: true
+---
+
+# Documentation
+
+Design docs live in [`docs/`](docs/README.md). Update them in the **same change** when you modify related behaviour — do not leave docs stale.
+
+## When to update
+
+| Change | Update |
+|--------|--------|
+| Terrain bake, atlas, queries, config | `docs/town-generation/terrain/*`, status in `docs/README.md` |
+| Building placement, zones, gap-fill, alleys, hop rings | **`docs/placement/rules.md`** (authoritative); related `docs/placement/*` |
+| Terrain building routing (border/scan) | `docs/placement/terrain-buildings.md` |
+| New building types or `buildings.yml` terrain fields | `docs/town-generation/terrain/queries.md`, `docs/config/reference.md` |
+| Town build pipeline, bridges, water | `docs/town-generation/water-and-bridges.md`, `docs/town-generation/road-graph.md` |
+| `Town.h` model changes | `docs/architecture/data-model.md`; [`AGENTS.md`](AGENTS.md) for compact facts |
+| HUD / debug overlays | `docs/app/rendering-and-debug.md` |
+| Growth queue / CLI | `docs/growth/queue-and-controls.md` |
+
+## How to update
+
+1. Read the relevant `docs/**/*.md` before large changes.
+2. After implementing, edit matching doc(s): behaviour, file paths, config keys.
+3. Keep [`AGENTS.md`](AGENTS.md) as a **short cheat sheet** with links — not a duplicate of full docs.
+4. Update capability status or Future work in `docs/README.md` when scope changes.
+
+## Doc map
+
+- `docs/README.md` — index and capability status
+- **`docs/placement/rules.md`** — authoritative placement rules
+- `docs/architecture/` — overview, data model, constraints
+- `docs/town-generation/` — road graph, water/bridges, terrain
+- `docs/placement/` — sync, frontiers, alleys, terrain buildings
+- `docs/growth/` — queue and controls
+- `docs/app/` — rendering and debug
+- `docs/config/reference.md` — YAML keys
+
+If a change does not fit existing files, add a focused page under `docs/` and link it from `docs/README.md`.

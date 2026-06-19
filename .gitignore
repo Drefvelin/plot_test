@@ -11,3 +11,7 @@ x64/
 Release/
 Debug/
 _deps/
+profile_*.txt
+*_profile.txt
+current_run.txt
+profile_comparison.txt

@@ -576,6 +576,7 @@ void BuildingPlacer::sync(Town& town, const BuildingGrowthQueue& queue, const De
     trimPlacementState(town, targetCount);
 
     ensurePlacementSyncMins(town, floors, townCfg, plots.frontageSetback);
+    town.syncTerrainAtlas  = (terrain != nullptr && terrain->valid) ? terrain : nullptr;
     town.syncPixelsPerUnit = pixelsPerUnit;
     const TerrainCatalog* catalog =
         terrain != nullptr && terrain->catalog != nullptr ? terrain->catalog : town.syncTerrainCatalog;

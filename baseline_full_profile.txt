@@ -1,6 +1,0 @@
-=== BASELINE full auto-grow (from prior profile run, pre hop-cache) ===
-ring_summary: target=187 placed=65 failures=122 final_suburban_max=999 final_urban_core=997
-profile_summary: total_ms=957068.030200 scopes=10
-profile: JunctionHops ms=150158.824500 calls=1286432
-profile: PlacerSync ms=276276.162500 calls=2
-wall_clock_approx_ms=280292

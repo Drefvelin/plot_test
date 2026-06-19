@@ -216,7 +216,7 @@ void logPlacementDecision(const Town& town, const PlacementSearchLog& log,
             std::string primary = "unknown";
             if (nearest->dimNoDepth >= nearest->dimRatio && nearest->dimNoDepth >= nearest->dimRoadShort
                 && nearest->dimNoDepth > 0) {
-                primary = "depth_cap_zero (road/boundary mismatch or ray found no wall)";
+                primary = "depth_cap_zero (no road or outline hit along inward ray)";
             } else if (nearest->dimRatio >= nearest->dimRoadShort && nearest->dimRatio > 0) {
                 primary = "depth_ratio (need wider road frontage for this building size)";
             } else if (nearest->dimRoadShort > 0) {

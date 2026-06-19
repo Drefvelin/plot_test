@@ -1,5 +1,0 @@
-=== BASELINE auto-grow 50 ===
-ring_summary: target=50 placed=50 failures=0 final_suburban_max=3 final_urban_core=1
-profile_summary: total_ms=1040.195400 scopes=10
-profile: JunctionHops ms=47.339100 calls=504
-wall_clock_approx_ms=4144

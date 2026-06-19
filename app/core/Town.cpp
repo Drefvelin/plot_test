@@ -779,6 +779,7 @@ void ensureTownFrontageInitialized(Town& town, float setback, const PlacementFlo
     if (probes != nullptr) {
         town.syncTerrainProbes = *probes;
     }
+    town.syncTerrainAtlas = (terrain != nullptr && terrain->valid) ? terrain : nullptr;
     ensurePlacementSyncMins(town, floors, townCfg, setback);
     resetRoadFrontageSegments(town, setback, true);
     resetWallSegments(town, setback, true);

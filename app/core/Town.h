@@ -314,6 +314,7 @@ struct Town {
     float             syncPixelsPerUnit             = 10.f;
     float             syncFrontageSetback   = 2.f;
     const TerrainCatalog* syncTerrainCatalog = nullptr;
+    const TerrainAtlas*   syncTerrainAtlas   = nullptr;
     TerrainProbeConfig    syncTerrainProbes{};
     std::vector<std::vector<AlleyProbeLine>> alleyProbesByQueueIndex;
     std::unordered_set<WallGapKey, WallGapKeyHash, WallGapKeyEqual> checkedAlleyGaps;

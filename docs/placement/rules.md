@@ -1,6 +1,23 @@
-# Building placement model
+# Building Placement Rules
 
-**Authoritative rules** for how buildings are placed. Hop-ring growth, terrain, and alleys must follow this document. If code or other plans disagree, **this file wins** until deliberately changed.
+## Purpose
+
+**Authoritative rules** for how buildings are placed. Hop-ring growth, terrain, and alleys must follow this document. If code or other docs disagree, **this file wins** until deliberately changed.
+
+## What it does
+
+Town grows building-by-building along roads. Every normal building uses a **plot** (road-facing lot). Hop bands (core / suburban / rural / any) gate which roads each type may use. Terrain-tagged types run terrain-first (border → scan → anchor → loose fallback). Core-only **gap-fill** squeezes `fill_in` types into wall gaps without a plot. **Alleys** are roads — same placement path as primaries.
+
+## How it works
+
+See Plain English summary and Technical reference below. Operational detail: [sync-pipeline.md](sync-pipeline.md), [frontiers.md](frontiers.md), [terrain-buildings.md](terrain-buildings.md).
+
+## Interactions
+
+- Data model: [../architecture/data-model.md](../architecture/data-model.md)
+- Hop rings: [zones-and-rings.md](zones-and-rings.md)
+- Terrain queries: [../town-generation/terrain/queries.md](../town-generation/terrain/queries.md)
+- Config: [../config/reference.md](../config/reference.md)
 
 ---
 
@@ -48,7 +65,7 @@ Gap-fill is **not** a substitute for plots. It is **not** used in suburban-only 
 
 ### Terrain placement
 
-Rural (and any building with a `terrain:` block in [`buildings.yml`](../app/config/buildings.yml)) can require a **preferred biome** and a **placement mode**:
+Rural (and any building with a `terrain:` block in [`buildings.yml`](../../app/config/buildings.yml)) can require a **preferred biome** and a **placement mode**:
 
 | Mode | Meaning | Hard minimum | Scoring |
 |------|---------|--------------|---------|
@@ -65,18 +82,18 @@ Rural (and any building with a `terrain:` block in [`buildings.yml`](../app/conf
 
 **Majority rule:** if `terrain.prefer` equals the map's `majorityLandKind`, **proximity is treated as inside** (no outline to measure against).
 
-**Terrain-first order** ([`GrowthRings.cpp`](../app/core/GrowthRings.cpp) `tryPlaceRuralOnRoads` / `tryPlaceAnyOnRoads`):
+**Terrain-first order** ([`GrowthRings.cpp`](../../app/core/GrowthRings.cpp) `tryPlaceRuralOnRoads` / `tryPlaceAnyOnRoads`):
 
-1. **Border types** — [`tryPlaceBorderPlot`](../app/core/BorderPlacement.cpp): peek [`BorderFrontier`](../app/core/BorderFrontier.cpp) buckets (plot segments whose inward ray reaches the building's `prefer` outline before crossing another road); **plot required** on frontage (`buildBorderHugPlot` / band plot), then main building (band = back of plot; hug = extend beyond plot to outline). Up to `border_max_attempts` (default 32) segment retries; failed attempts log `border_attempt_fail`. Loose hug retries **band** style after exhaustion.
+1. **Border types** — [`tryPlaceBorderPlot`](../../app/core/BorderPlacement.cpp): peek [`BorderFrontier`](../../app/core/BorderFrontier.cpp) buckets (plot segments whose inward ray reaches the building's `prefer` outline before crossing another road); **plot required** on frontage (`buildBorderHugPlot` / band plot), then main building (band = back of plot; hug = extend beyond plot to outline). Up to `border_max_attempts` (default 32) segment retries; failed attempts log `border_attempt_fail`. Loose hug retries **band** style after exhaustion.
 2. **All terrain types** — `tryPlaceRoadPlot` with **terrain scan** (`collectFrontageSlots` sorted by zone + terrain score; not the centerDist frontier).
-3. **Loose only** — after terrain scan, **`terrain_anchor`** (BFS from last real terrain placement on that `prefer` kind; cap = `plots.terrain_anchor_max_roads` in [`config.yml`](../app/config/config.yml), default **4**) then vanilla frontier on the type's band scope (`frontier_loose_fallback` in layout log). Rural = rural band only; `any` = all bands. Anchor roads are updated only by successful terrain scan or border placement — not by anchor/loose fallback.
+3. **Loose only** — after terrain scan, **`terrain_anchor`** (BFS from last real terrain placement on that `prefer` kind; cap = `plots.terrain_anchor_max_roads` in [`config.yml`](../../app/config/config.yml), default **4**) then vanilla frontier on the type's band scope (`frontier_loose_fallback` in layout log). Rural = rural band only; `any` = all bands. Anchor roads are updated only by successful terrain scan or border placement — not by anchor/loose fallback.
 4. **Strict** — stop after step 2 fails (`terrain_strict_fail` in layout log).
 
 Urban/residential buildings without `terrain:` still use the plot frontier only.
 
 `farm` is not special — `terrain: { prefer: plains, placement: inside, requirement: loose }` like any other inside type.
 
-Config keys: `terrain.prefer` (scalar **or YAML list** — OR semantics at peek; alias `water` → sea+river), `terrain.placement`, `terrain.requirement`, `border_style` (`band`|`hug`), `border_overhang_dist`, `proximity_max_dist`, `border_min_dist`, `border_max_dist`. Town [`town.yml`](../app/config/town.yml): `border_max_attempts`. Border buckets rebuilt at `FullRebuild` and refreshed per bank on carve. Logic in [`BorderFrontier.cpp`](../app/core/BorderFrontier.cpp), [`BorderPlacement.cpp`](../app/core/BorderPlacement.cpp), [`TerrainPlacement.cpp`](../app/core/TerrainPlacement.cpp). Terrain scan / anchor still use `preferKinds.front()` when a list is given.
+Config keys: `terrain.prefer` (scalar **or YAML list** — OR semantics at peek; alias `water` → sea+river), `terrain.placement`, `terrain.requirement`, `border_style` (`band`|`hug`), `border_overhang_dist`, `proximity_max_dist`, `border_min_dist`, `border_max_dist`. Town [`town.yml`](../../app/config/town.yml): `border_max_attempts`. Border buckets rebuilt at `FullRebuild` and refreshed per bank on carve. Logic in [`BorderFrontier.cpp`](../../app/core/BorderFrontier.cpp), [`BorderPlacement.cpp`](../../app/core/BorderPlacement.cpp), [`TerrainPlacement.cpp`](../../app/core/TerrainPlacement.cpp). Terrain scan / anchor still use `preferKinds.front()` when a list is given.
 
 ### Roads are roads
 
@@ -116,14 +133,15 @@ Per-road placement is centralized in `tryPlaceOnTownRoad` (`GrowthRings.cpp`): *
 
 ### Coordinate and road primitives
 
-- World units; see [`AGENTS.md`](../AGENTS.md).
-- [`Road`](../app/core/Town.h): segment `a`–`b`; flags `isSecondary`, `isBridge`, `isTerrainCorridor`.
-- [`RoadSideFrontage`](../app/core/Town.h): per-bank `segments` (plot frontage) and `wallSegments` (free wall gaps) with `startT`/`endT` along the road edge.
+- World units; see [`AGENTS.md`](../../AGENTS.md).
+- [`Road`](../../app/core/Town.h): segment `a`–`b`; flags `isSecondary`, `isBridge`, `isTerrainCorridor`.
+- [`RoadSideFrontage`](../../app/core/Town.h): per-bank `segments` (plot frontage) and `wallSegments` (free wall gaps) with `startT`/`endT` along the road edge.
 - **Wall segments:** one span per bank at init `[setback, len−setback]`; carved only by `carveRoadWallForFootprint` on **main** building footprints (plot lots and gap-fill). Plot width does not carve the wall line — gaps between main fronts remain in `wallSegments`. Alley/gap-fill collectors read stored `wallSegments`.
-- [`Plot`](../app/core/Town.h): `corners[4]`, `roadId`, `roadBank`, `area`, optional `outlineTangent` / `outlineInward` (hug plots); created at placement time on the instance.
-- [`BuildingInstance`](../app/core/Town.h): `id` (uint32 queue index), `typeId` (uint16 DefCache building type id), `plot`, `footprints`, `placementMode`.
-- **Footprint orthogonality:** every `BuildingFootprint` must be an orthogonal rectangle (four 90° corners; axis-aligned or rotated, never a parallelogram warped to plot sides). Building orientation is **not** required to match plot front/back or outline tangent. Enforced via `footprintHasRightAngles` in [`PlotGeometry.cpp`](../app/core/PlotGeometry.cpp) (`footprintPlacementValid`, gap-fill, border placement).
+- [`Plot`](../../app/core/Town.h): `corners[4]`, `roadId`, `roadBank`, `area`, optional `outlineTangent` / `outlineInward` (hug plots); created at placement time on the instance.
+- [`BuildingInstance`](../../app/core/Town.h): `id` (uint32 queue index), `typeId` (uint16 DefCache building type id), `plot`, `footprints`, `placementMode`.
+- **Footprint orthogonality:** every `BuildingFootprint` must be an orthogonal rectangle (four 90° corners; axis-aligned or rotated, never a parallelogram warped to plot sides). Building orientation is **not** required to match plot front/back or outline tangent. Enforced via `footprintHasRightAngles` in [`PlotGeometry.cpp`](../../app/core/PlotGeometry.cpp) (`footprintPlacementValid`, gap-fill, border placement).
 - **Border building layout:** border types peek per-terrain **border frontier** buckets (road plot segments classified by inward ray → nearest outline, rejected if another road is hit closer than the outline). **Plot required** on frontage; then main at plot back (band, shrink steps) or hugging outline (may extend beyond plot). Validation: **no road overlap** and **no building overlap** only — water spill OK. Failed attempts log `border_attempt_fail` with `main=` / `slot=` reject counts. Loose hug retries band style.
+- **Plot depth cap** (`maxPlotDepthToRoadHit` in [`PlotGeometry.cpp`](../../app/core/PlotGeometry.cpp)): at three frontage sample points, ray inward for nearest other-road hit and nearest sea/river outline hit (`syncTerrainProbes.borderIds`). Cap = **min**(road hit / 2, outline hit). Road halving is the shared block between two roads; outline uses full distance (back of lot at shoreline). Zero only when neither limit exists.
 
 ### Zone types (`buildings.yml` → `BuildingDef.type`)
 
@@ -196,14 +214,14 @@ All frontier buckets live on **`Town.frontierManager`**. Hot-path slot collectio
 - **Sync:** `notifyPlacementFrontier` only — no direct `frontierRefresh*` from carve/placement code. Events: `FullRebuild`, `PlotCarved`, `RingExtended`, `TopologyChanged`, `InstanceRemoved`.
 - **Rebuild:** `FullRebuild` rebuilds plot/wall/alley + terrain-scan + border (town bootstrap after `ensureTownFrontageInitialized`). `TopologyChanged` is **bulk secondary replay only** (`rebuildSecondaryRoadsFromRecords`) — same rebuilds, not per-alley.
 - **Incremental alley:** `applySecondaryRoadRecord` calls `notifyRoadFrontierRefresh` on host, new alley, and roads sharing endpoints at `a`/`b` — not `TopologyChanged`.
-- **Border placement:** [`BorderPlacement.cpp`](../app/core/BorderPlacement.cpp) + [`BorderFrontier.cpp`](../app/core/BorderFrontier.cpp). Plot-first on peeked segment; band/hug building layout; retry loop (`border_max_attempts`). **`placement: border`** types never use `frontier_loose_fallback`; loose retries **band** after hug fails.
+- **Border placement:** [`BorderPlacement.cpp`](../../app/core/BorderPlacement.cpp) + [`BorderFrontier.cpp`](../../app/core/BorderFrontier.cpp). Plot-first on peeked segment; band/hug building layout; retry loop (`border_max_attempts`). **`placement: border`** types never use `frontier_loose_fallback`; loose retries **band** after hug fails.
 - **Incremental:** `PlotCarved` refreshes plot/wall/alley bank + terrain-scan + border bank. `InstanceRemoved` refreshes bank when border building removed. Restore replay suppresses notify.
 - **Ring bump:** `RingExtended` runs `frontierExtendBands` (wall resync on band change, re-bucket all three road frontier types per affected bank).
 - **Pull:** `peekClosestPlotSlot` / `peekClosestWallGapSlot` / `peekNextTerrainScanSlot` — unchanged behaviour.
 
 ### Alleys
 
-**Creation only** — [`SecondaryRoadPlacement.cpp`](../app/core/SecondaryRoadPlacement.cpp):
+**Creation only** — [`SecondaryRoadPlacement.cpp`](../../app/core/SecondaryRoadPlacement.cpp):
 
 - Wall gap on host road → inward ray → hit road → `SecondaryRoadRecord` + `Road` with `isSecondary = true`.
 - **Host bank must already have a building** (PlotLot or SegmentGapFill on that `roadId`+`bankIndex`); gaps on undeveloped banks are skipped (not marked checked).
@@ -278,9 +296,9 @@ farm:
 
 | Rule | Location | Status |
 |------|----------|--------|
-| Depth-cache key quantization | `kDepthCacheTStep` / `kDepthCacheDimStep` in [`PlotGeometry.cpp`](../app/core/PlotGeometry.cpp) — fewer distinct per-bank depth memo entries | Done |
-| Building type IDs | [`BuildingTypes.h`](../app/core/BuildingTypes.h), `DefCache::typeIdFor`, `BuildingInstance.typeId` | Done |
-| Sim memory report | [`MemoryReport.cpp`](../app/core/MemoryReport.cpp) — markdown breakdown on exit; alley probe debug excluded from sim totals | Done |
+| Depth-cache key quantization | `kDepthCacheTStep` / `kDepthCacheDimStep` in [`PlotGeometry.cpp`](../../app/core/PlotGeometry.cpp) — fewer distinct per-bank depth memo entries | Done |
+| Building type IDs | [`BuildingTypes.h`](../../app/core/BuildingTypes.h), `DefCache::typeIdFor`, `BuildingInstance.typeId` | Done |
+| Sim memory report | [`MemoryReport.cpp`](../../app/core/MemoryReport.cpp) — markdown breakdown on exit; alley probe debug excluded from sim totals | Done |
 | Plot before gap-fill | `tryPlaceOnTownRoad` | Done |
 | Frontier plot / wall / alley pull | `PlacementFrontier.cpp`, `FrontagePlacement.cpp`, `FrontageGapFill.cpp`, `SecondaryRoadPlacement.cpp` | Done |
 | Gap-fill only in core | `mayGapFillOnRoad` | Done |
@@ -293,15 +311,15 @@ farm:
 
 | File | Role |
 |------|------|
-| [`MemoryReport.cpp`](../app/core/MemoryReport.cpp) | Sim memory breakdown on exit |
-| [`PlacementFrontier.cpp`](../app/core/PlacementFrontier.cpp) | Distance-bucketed plot/wall/alley frontiers |
-| [`BuildingPlacer.cpp`](../app/core/BuildingPlacer.cpp) | Growth sync, queue cursor |
-| [`GrowthRings.cpp`](../app/core/GrowthRings.cpp) | Hop bands, road sweeps, bump |
-| [`FrontagePlacement.cpp`](../app/core/FrontagePlacement.cpp) | Plot placement |
-| [`FrontageGapFill.cpp`](../app/core/FrontageGapFill.cpp) | Gap-fill (core densify) |
-| [`FrontageZones.cpp`](../app/core/FrontageZones.cpp) | Zone scoring, `roadHop` |
-| [`SecondaryRoadPlacement.cpp`](../app/core/SecondaryRoadPlacement.cpp) | Alley creation |
-| [`terrain-placement.md`](terrain-placement.md) | Terrain hooks + hop-ring **operational** notes (subordinate to this doc) |
+| [`MemoryReport.cpp`](../../app/core/MemoryReport.cpp) | Sim memory breakdown on exit |
+| [`PlacementFrontier.cpp`](../../app/core/PlacementFrontier.cpp) | Distance-bucketed plot/wall/alley frontiers |
+| [`BuildingPlacer.cpp`](../../app/core/BuildingPlacer.cpp) | Growth sync, queue cursor |
+| [`GrowthRings.cpp`](../../app/core/GrowthRings.cpp) | Hop bands, road sweeps, bump |
+| [`FrontagePlacement.cpp`](../../app/core/FrontagePlacement.cpp) | Plot placement |
+| [`FrontageGapFill.cpp`](../../app/core/FrontageGapFill.cpp) | Gap-fill (core densify) |
+| [`FrontageZones.cpp`](../../app/core/FrontageZones.cpp) | Zone scoring, `roadHop` |
+| [`SecondaryRoadPlacement.cpp`](../../app/core/SecondaryRoadPlacement.cpp) | Alley creation |
+| [terrain-buildings.md](terrain-buildings.md) | Terrain hooks + hop-ring **operational** notes (subordinate to this doc) |
 
 ### Debug
 
