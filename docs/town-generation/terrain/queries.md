@@ -21,7 +21,7 @@ Placement validation uses `polygonBuildable()` — all plot/footprint corners an
 
 ## How it works
 
-Files: [`TerrainAtlas.h`](../../../app/core/TerrainAtlas.h), [`TerrainPlacement.cpp`](../../../app/core/TerrainPlacement.cpp), [`PlotGeometry.cpp`](../../../app/core/PlotGeometry.cpp).
+Files: [`TerrainAtlas.h`](../../../app/core/terrain/TerrainAtlas.h), [`TerrainPlacement.cpp`](../../../app/core/placement/terrain/TerrainPlacement.cpp), [`PlotGeometry.cpp`](../../../app/core/placement/geometry/PlotGeometry.cpp).
 
 **Building terrain fields** (`buildings.yml` → `DefCache`):
 

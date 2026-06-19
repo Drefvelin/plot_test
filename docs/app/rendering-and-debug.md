@@ -39,7 +39,7 @@ Rebuilt each sync:
 
 Terrain **T** draws forest (green) and hills (gray-brown) outlines when non-majority.
 
-Files: [`App.cpp`](../../app/core/App.cpp), [`Hud.cpp`](../../app/core/Hud.cpp).
+Files: [`App.cpp`](../../app/core/render/App.cpp), [`Hud.cpp`](../../app/core/render/Hud.cpp).
 
 Logs written to `logs/` — see [config reference](../config/reference.md) logging section.
 

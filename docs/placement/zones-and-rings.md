@@ -23,10 +23,10 @@ Core ⊂ suburban. Rural is strictly outside suburban. `any` ignores hop gates b
 
 Fields on `Town`: `suburbanMaxHop`, `urbanCoreMaxHop`, `ringPhase` (`Normal` | `DensifyCore`).
 
-Helpers in [`GrowthRings.cpp`](../../app/core/GrowthRings.cpp), [`FrontageZones.cpp`](../../app/core/FrontageZones.cpp):
+Helpers in [`GrowthRings.cpp`](../../app/core/placement/orchestration/GrowthRings.cpp), [`FrontageZones.cpp`](../../app/core/placement/zones/FrontageZones.cpp):
 
 - `roadHop`, `getRoadHop`, `getJunctionHops` (cached BFS)
-- `collectSuburbanRoadIds`, `collectCoreRoadIds`, `collectRuralRoadIds`
+- `collectCoreRoadIds`
 - `bumpGrowthRings`, `roadFrontierBand`
 
 Starting suburban ring from [`town.yml`](../../app/config/town.yml): `initial_suburban_max_hops`.

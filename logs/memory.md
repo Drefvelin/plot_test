@@ -1,6 +1,6 @@
 # Simulation memory report
 
-Generated: 2026-06-19 14:08:15 | Buildings placed: 194 | Queue target: 194
+Generated: 2026-06-19 16:20:19 | Buildings placed: 194 | Queue target: 194
 
 > Capacity-based heap estimate. Excludes terrain image rasters, render caches, and debug-only data (alley probe history).
 
@@ -52,8 +52,6 @@ Generated: 2026-06-19 14:08:15 | Buildings placed: 194 | Queue target: 194
 | placementSkipReasonsSummary | 47 | 1 |
 | junctionHopCache | 1216 | 229 |
 | roadHopCache | 1444 | 274 |
-| suburbanRoadListCache | 0 | 0 |
-| ruralRoadListCache | 0 | 0 |
 | ringAvgDistByHop | 148 | 29 |
 | town (scalars + flags) | 98 | 0 |
 
@@ -86,6 +84,6 @@ Generated: 2026-06-19 14:08:15 | Buildings placed: 194 | Queue target: 194
 | terrainAtlas.raster | 2097152 | terrain image |
 | terrainAtlas.forbiddenDilated | 1048576 | dilated forbidden mask |
 | terrainAtlas.overlayTexture | 4194344 | SFML texture |
-| town.alleyProbesByQueueIndex | 40784 | debug-only (not in Unreal sim) |
+| town.alleyProbesByQueueIndex | 39680 | debug-only (not in Unreal sim) |
 | town.alleyProbeFailMesh | 0 | debug alley overlay |
 | town.renderMeshesAndLabels | 3264500 | render-only |

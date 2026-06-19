@@ -18,7 +18,7 @@ No per-sync full carve replay, exhaustion rescan, or town-wide alley cleanup.
 
 ## How it works
 
-Entry: [`BuildingPlacer.cpp`](../../app/core/BuildingPlacer.cpp) `sync`.
+Entry: [`BuildingPlacer.cpp`](../../app/core/placement/orchestration/BuildingPlacer.cpp) `sync`.
 
 **Urban/residential order** (see [rules.md](rules.md)):
 

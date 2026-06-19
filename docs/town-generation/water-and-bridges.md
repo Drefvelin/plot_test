@@ -28,7 +28,7 @@ Bridges render brown; skip water clip and frontage assignment.
 
 ## How it works
 
-Implementation: [`RoadNetwork.cpp`](../../app/core/RoadNetwork.cpp), [`TownBuilder.cpp`](../../app/core/TownBuilder.cpp), bucket reveal in [`Town.cpp`](../../app/core/Town.cpp).
+Implementation: [`RoadNetwork.cpp`](../../app/core/roads/RoadNetwork.cpp), [`TownBuilder.cpp`](../../app/core/generation/TownBuilder.cpp), bucket reveal in [`Town.cpp`](../../app/core/town/Town.cpp).
 
 **Waterside detection** — `collectWatersideJunctionIds` samples `TerrainAtlas::sample` at junction and on a disc (step 0.25 u). No outline geometry for eligibility.
 

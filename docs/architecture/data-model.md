@@ -45,11 +45,11 @@ outlineCap = nearest sea/river outline hit (full distance, no halving)
 maxDepth = min(roadCap, outlineCap)   — omit a term when that hit is missing
 ```
 
-Host road excluded from road probes. Outline uses `Town.syncTerrainProbes.borderIds` and `syncTerrainAtlas`. `syncMinPlotDepth` and `syncMinPlotFrontage` set from [`PlacementFloors`](../../app/core/PlacementFloors.cpp) at sync.
+Host road excluded from road probes. Outline uses `Town.syncTerrainProbes.borderIds` and `syncTerrainAtlas`. `syncMinPlotDepth` and `syncMinPlotFrontage` set from [`PlacementFloors`](../../app/core/placement/orchestration/PlacementFloors.cpp) at sync.
 
 **Building footprints** must be orthogonal rectangles (`footprintHasRightAngles` in `PlotGeometry.cpp`).
 
-Source: [`app/core/Town.h`](../../app/core/Town.h).
+Source: [`app/core/town/Town.h`](../../app/core/town/Town.h).
 
 ## Interactions
 

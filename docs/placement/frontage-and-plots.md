@@ -22,7 +22,7 @@ Road banks expose plot slots; placement carves them and creates road-facing lots
 | Buildability | `polygonBuildable()` — corners + edge samples |
 | Footprints | Orthogonal rectangles only; `footprintPlacementValid` after layout |
 
-Key files: [`FrontagePlacement.cpp`](../../app/core/FrontagePlacement.cpp), [`PlotGeometry.cpp`](../../app/core/PlotGeometry.cpp), [`PlotDimensions.cpp`](../../app/core/PlotDimensions.cpp), [`Town.cpp`](../../app/core/Town.cpp) (`ensureTownFrontageInitialized`, carve helpers).
+Key files: [`FrontagePlacement.cpp`](../../app/core/placement/frontage/FrontagePlacement.cpp), [`PlotGeometry.cpp`](../../app/core/placement/geometry/PlotGeometry.cpp), [`PlotDimensions.cpp`](../../app/core/placement/geometry/PlotDimensions.cpp), [`Town.cpp`](../../app/core/town/Town.cpp) (`ensureTownFrontageInitialized`, carve helpers).
 
 **Water-facing banks** — `assignRoadSideInwards` zeroes `inward` on forbidden side; no frontage there.
 

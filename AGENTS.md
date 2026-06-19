@@ -19,17 +19,17 @@ Update docs in the **same change** when modifying behaviour (see `.cursor/rules/
 
 - Simulation geometry in **world units** (`Vec2` / `float`).
 - Rendering multiplies by `pixels_per_unit`.
-- Helpers: [`app/core/Units.h`](app/core/Units.h).
+- Helpers: [`app/core/common/Units.h`](app/core/common/Units.h).
 
 ## Voronoi library boundary (mandatory)
 
-**[jc_voronoi](app/core/third_party/jc_voronoi.h)** only in [`TownBuilder.cpp`](app/core/TownBuilder.cpp) at initial build.
+**[jc_voronoi](app/core/generation/third_party/jc_voronoi.h)** only in [`TownBuilder.cpp`](app/core/generation/TownBuilder.cpp) at initial build.
 
 After build: no `jcv_*` anywhere else; all geometry from stored `Town` data and our math.
 
 ## Core data model
 
-[`app/core/Town.h`](app/core/Town.h):
+[`app/core/town/Town.h`](app/core/town/Town.h):
 
 | Type | Role |
 |------|------|
@@ -59,7 +59,7 @@ Detail: [`docs/architecture/overview.md`](docs/architecture/overview.md), [`docs
 ## Config pointers
 
 - `diagram.*`, `world.pixels_per_unit`, `plots.*`, `voronoi.*`, `terrain.*`, `growth.*` — [`docs/config/reference.md`](docs/config/reference.md)
-- Building types — [`app/config/buildings.yml`](app/config/buildings.yml) via [`DefCache`](app/core/DefCache.h)
+- Building types — [`app/config/buildings.yml`](app/config/buildings.yml) via [`DefCache`](app/core/config/DefCache.h)
 
 ## HUD keys
 
@@ -69,13 +69,34 @@ Detail: [`docs/app/rendering-and-debug.md`](docs/app/rendering-and-debug.md).
 
 ## Key source files
 
+Flat `app/core/` is now organized into subsystem folders (include root stays `app/core`, so includes are path-qualified, e.g. `#include "town/Town.h"`).
+
 ```
 app/core/
-  Town.h / Town.cpp       — data, frontage, bridge buckets
-  TownBuilder.cpp         — Voronoi (library confined here)
-  RoadNetwork.cpp         — sanitize, bridges, corridors
-  BuildingPlacer.cpp      — growth sync
-  GrowthRings.cpp         — hop bands, road sweeps
-  FrontierManager.cpp     — frontier notify fan-out
-  BorderPlacement.cpp     — terrain border buildings
+  common/      Vec2.h, Units.h, Geometry.{h,cpp}, RenderPrimitives.{h,cpp}
+  config/      Config, TownConfig, DefCache, BuildingTypes.h, YamlUtil
+  util/        Logger, Profile, MemoryReport
+  terrain/     Terrain.h, TerrainCatalog, TerrainColors, TerrainAtlas.h, TerrainBake
+  town/        Town.h (data hub) + split impls:
+                 Town.cpp (shared helpers, namespace townint) + TownInternal.h
+                 TownJunctions, TownFrontage, TownCarving, TownSecondary,
+                 TownBridgeBuckets, TownMeshes
+  generation/  TownBuilder (Voronoi confined here), third_party/jc_voronoi.h
+  roads/       RoadNetwork.h + split impls:
+                 RoadNetwork.cpp (shared helpers, namespace roadnet) + RoadNetworkInternal.h
+                 CorridorCull, RoadIntersectionSplit, WaterSanitize, RoadDedup,
+                 BridgeResolve, SecondaryRoadPlacement, RoadExhaustion
+  placement/
+    orchestration/  BuildingPlacer (growth sync), BuildingGrowthQueue, GrowthRings
+                    (hop bands, road sweeps), PlacementPrep, PlacementFloors,
+                    MovableRelocation
+    zones/          FrontageZones
+    frontage/       FrontagePlacement, FrontageGapFill
+    frontier/       FrontierManager (notify fan-out), PlacementFrontier,
+                    TerrainScanFrontier, BorderFrontier, FrontierSlotUtils
+    terrain/        TerrainPlacement, BorderPlacement (terrain border buildings)
+    geometry/       PlotGeometry, PlotDimensions, BuildingLayout
+    logging/        PlacementLogging, TerrainPlacementLogging
+  render/      App, Hud, Camera
+  main.cpp     (stays at root)
 ```

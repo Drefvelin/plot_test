@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Single index of YAML keys loaded into [`Config.h`](../../app/core/Config.h) and related definition files.
+Single index of YAML keys loaded into [`Config.h`](../../app/core/config/Config.h) and related definition files.
 
 ## What it does
 
@@ -92,7 +92,7 @@ Per building type:
 
 Sections: `building_templates`, `plot_sizes` — area bands for layouts and plots.
 
-Loaded via [`DefCache`](../../app/core/DefCache.h).
+Loaded via [`DefCache`](../../app/core/config/DefCache.h).
 
 ## Interactions
 

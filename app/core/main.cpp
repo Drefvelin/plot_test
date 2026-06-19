@@ -1,36 +1,20 @@
-#include "App.h"
-#include "Config.h"
-#include "DefCache.h"
-#include "Logger.h"
-#include "PlacementFloors.h"
-#include "Profile.h"
-#include "TerrainAtlas.h"
-#include "TerrainCatalog.h"
-#include "TownConfig.h"
+#include "render/App.h"
+#include "config/Config.h"
+#include "config/DefCache.h"
+#include "util/Logger.h"
+#include "placement/orchestration/PlacementFloors.h"
+#include "util/Profile.h"
+#include "terrain/TerrainAtlas.h"
+#include "terrain/TerrainCatalog.h"
+#include "config/TownConfig.h"
+#include "config/YamlUtil.h"
 
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <string>
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
-
 namespace {
-
-std::filesystem::path executableDirectory() {
-#ifdef _WIN32
-    wchar_t buffer[MAX_PATH];
-    const DWORD len = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    return std::filesystem::path(buffer).parent_path();
-#else
-    return std::filesystem::read_symlink("/proc/self/exe").parent_path();
-#endif
-}
 
 GrowthConfig parseGrowthCli(int argc, char* argv[], const Config& config, int defaultTarget) {
     GrowthConfig growth = config.growth;
@@ -77,7 +61,7 @@ GrowthConfig parseGrowthCli(int argc, char* argv[], const Config& config, int de
 int main(int argc, char* argv[]) {
     const auto configPath = Config::resolveConfigPath();
     const Config config = Config::load(configPath);
-    const auto projectRoot = Config::resolveProjectRoot(executableDirectory());
+    const auto projectRoot = Config::resolveProjectRoot(yamlutil::executableDir());
 
     Logger::init(config, projectRoot);
     Logger::log("app", "config loaded from " + configPath.string());

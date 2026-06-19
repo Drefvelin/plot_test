@@ -18,11 +18,11 @@ Increase core density: gap-fill places footprint-only buildings in wall gaps; al
 - Uses `mainOccupancyT` spans for clip; `footprintOverlapsMains` for overlap.
 - Success: `removeSecondaryRecordsBlockedByMainFootprint` if alley record blocked.
 
-File: [`FrontageGapFill.cpp`](../../app/core/FrontageGapFill.cpp).
+File: [`FrontageGapFill.cpp`](../../app/core/placement/frontage/FrontageGapFill.cpp).
 
 ### Alley creation
 
-File: [`SecondaryRoadPlacement.cpp`](../../app/core/SecondaryRoadPlacement.cpp).
+File: [`SecondaryRoadPlacement.cpp`](../../app/core/roads/SecondaryRoadPlacement.cpp).
 
 Probe order per `(gapT, angle)`:
 

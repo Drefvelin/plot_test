@@ -26,7 +26,7 @@ Bake logs (`terrain.log`): component counts, `majority_land=`, `river_nodes=`, `
 | Insets | `water_inset`, `shore_inset`, `river_inset` |
 | Grid | `terrain.grid_size` |
 
-`TerrainAtlas` structure ([`TerrainAtlas.h`](../../../app/core/TerrainAtlas.h)):
+`TerrainAtlas` structure ([`TerrainAtlas.h`](../../../app/core/terrain/TerrainAtlas.h)):
 
 - `majorityLandKind`
 - `forbiddenPolygons`, `*Outlines` (open polylines)

@@ -8,9 +8,9 @@ Fixed rules that every subsystem must respect: coordinate scale and Voronoi libr
 
 **World units** — All simulation geometry uses `Vec2` / `float` in world units. Rendering multiplies by `pixels_per_unit` (default **10** → 10 screen pixels = 1 unit). A 1024×1024 unit diagram renders at 10240×10240 pixels.
 
-Helpers: [`app/core/Units.h`](../../app/core/Units.h). Config: `world.pixels_per_unit` in [`config.yml`](../../app/config/config.yml).
+Helpers: [`app/core/common/Units.h`](../../app/core/common/Units.h). Config: `world.pixels_per_unit` in [`config.yml`](../../app/config/config.yml).
 
-**Voronoi library boundary** — [`jc_voronoi`](../../app/core/third_party/jc_voronoi.h) (`jcv_*`) is used in **one file only**: [`TownBuilder.cpp`](../../app/core/TownBuilder.cpp) during initial town build.
+**Voronoi library boundary** — [`jc_voronoi`](../../app/core/generation/third_party/jc_voronoi.h) (`jcv_*`) is used in **one file only**: [`TownBuilder.cpp`](../../app/core/generation/TownBuilder.cpp) during initial town build.
 
 Allowed: generate diagram, iterate edges/sites, copy coordinates into `Road` (`a`, `b`), free diagram.
 

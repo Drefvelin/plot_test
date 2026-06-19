@@ -33,9 +33,9 @@ Buildings with `terrain:` in [`buildings.yml`](../../app/config/buildings.yml) b
 | `fisher_hut` | any | `[sea, river]` | border hug | loose |
 | `watermill` | any | river | border hug | **strict** |
 
-**Border layout** — [`BorderFrontier.cpp`](../../app/core/BorderFrontier.cpp) classifies plot segments at init; [`BorderPlacement.cpp`](../../app/core/BorderPlacement.cpp) peeks closest, builds plot (`buildBorderHugPlot` or band), places main. Validation: no road/building overlap; water spill OK. Up to `border_max_attempts` retries.
+**Border layout** — [`BorderFrontier.cpp`](../../app/core/placement/frontier/BorderFrontier.cpp) classifies plot segments at init; [`BorderPlacement.cpp`](../../app/core/placement/terrain/BorderPlacement.cpp) peeks closest, builds plot (`buildBorderHugPlot` or band), places main. Validation: no road/building overlap; water spill OK. Up to `border_max_attempts` retries.
 
-**Terrain scan** — [`TerrainScanFrontier.cpp`](../../app/core/TerrainScanFrontier.cpp) pre-sorted buckets (Plains/Forest/Hills).
+**Terrain scan** — [`TerrainScanFrontier.cpp`](../../app/core/placement/frontier/TerrainScanFrontier.cpp) pre-sorted buckets (Plains/Forest/Hills).
 
 **Anchor** — `Town.lastTerrainAnchorRoadId[prefer]` updated on successful scan/border only; BFS cap `plots.terrain_anchor_max_roads`.
 

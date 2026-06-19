@@ -42,13 +42,15 @@ BuildingPlacer::sync (each frame / auto-grow step)
 App render loop
 ```
 
+Source lives under subsystem folders in `app/core/` (include root stays `app/core`).
+
 | Stage | Primary files |
 |-------|---------------|
-| Config load | `Config.cpp`, `app/config/*.yml` |
-| Town build | `TownBuilder.cpp`, `RoadNetwork.cpp`, `TerrainBake.cpp` |
-| Placement | `BuildingPlacer.cpp`, `GrowthRings.cpp`, `FrontagePlacement.cpp` |
-| Frontiers | `FrontierManager.cpp`, `PlacementFrontier.cpp` |
-| Render | `App.cpp`, `Hud.cpp` |
+| Config load | `config/Config.cpp`, `app/config/*.yml` |
+| Town build | `generation/TownBuilder.cpp`, `roads/RoadNetwork.cpp` (+ `roads/CorridorCull`, `WaterSanitize`, `BridgeResolve`, …), `terrain/TerrainBake.cpp` |
+| Placement | `placement/orchestration/BuildingPlacer.cpp`, `placement/orchestration/GrowthRings.cpp`, `placement/frontage/FrontagePlacement.cpp` |
+| Frontiers | `placement/frontier/FrontierManager.cpp`, `placement/frontier/PlacementFrontier.cpp` |
+| Render | `render/App.cpp`, `render/Hud.cpp` |
 
 ## Interactions
 

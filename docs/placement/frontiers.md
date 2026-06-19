@@ -36,7 +36,7 @@ Incremental alley: `applySecondaryRoadRecord` → `notifyRoadFrontierRefresh` on
 
 Per-bank exhaustion (`RoadExhaustion.h`): `PlotDone`, `GapDone`, `AlleyDone` — updated on carve, not full rescan each sync.
 
-Files: [`FrontierManager.cpp`](../../app/core/FrontierManager.cpp), [`BorderFrontier.cpp`](../../app/core/BorderFrontier.cpp), [`PlacementFrontier.cpp`](../../app/core/PlacementFrontier.cpp).
+Files: [`FrontierManager.cpp`](../../app/core/placement/frontier/FrontierManager.cpp), [`BorderFrontier.cpp`](../../app/core/placement/frontier/BorderFrontier.cpp), [`PlacementFrontier.cpp`](../../app/core/placement/frontier/PlacementFrontier.cpp).
 
 ## Interactions
 
