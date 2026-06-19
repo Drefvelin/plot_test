@@ -42,11 +42,12 @@ terrain:
   corridor_parallel_probe_offset: 4.0
   corridor_parallel_cos: 0.98
   bridges_enabled: true
-  bridge_max_span: 180.0
-  bridge_outline_max_dist: 8.0
+  bridge_max_span: 80.0
   shore_junction_merge_dist: 2.0   # merge nearby waterside junctions after sanitize (0 = off)
+  bridge_waterside_max_dist: 4.0   # raster probe radius (world units); >= water_inset recommended
   bridge_snap_enabled: true
   bridge_snap_search_radius: 8.0
+  bridge_bucket_hops: 2   # land roads within N junction-hops of each bridge end (bucket reveal)
 
 colors:
   inside:  [255, 255, 255]
@@ -82,6 +83,8 @@ logging:
       filename: terrain.log
     - channel: terrain_place
       filename: terrain_place.log
+    - channel: bridge
+      filename: bridge.log
     - channel: profile
       filename: profile.log
 

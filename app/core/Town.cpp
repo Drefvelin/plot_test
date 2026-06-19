@@ -1,5 +1,6 @@
 #include "Town.h"
 
+#include "Logger.h"
 #include "Profile.h"
 #include "PlacementFloors.h"
 #include "PlacementFrontier.h"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <unordered_set>
 
 namespace {
@@ -162,6 +164,27 @@ void appendJunctionDisc(sf::VertexArray& mesh, const sf::Vector2f& center, float
     }
 }
 
+void appendCircleRing(sf::VertexArray& mesh, const sf::Vector2f& center, float radiusPx,
+                      float thicknessPx, const sf::Color& color, int segments = 48) {
+    sf::Vector2f prev{center.x + radiusPx, center.y};
+    for (int i = 1; i <= segments; ++i) {
+        const float    a = static_cast<float>(i) / static_cast<float>(segments) * 2.f
+                        * 3.14159265f;
+        const sf::Vector2f next{center.x + std::cos(a) * radiusPx,
+                                center.y + std::sin(a) * radiusPx};
+        appendThickSegment(mesh, {prev.x, prev.y}, {next.x, next.y}, thicknessPx, color);
+        prev = next;
+    }
+}
+
+void appendHitCross(sf::VertexArray& mesh, const sf::Vector2f& center, float armPx,
+                    float thicknessPx, const sf::Color& color) {
+    appendThickSegment(mesh, {center.x - armPx, center.y - armPx}, {center.x + armPx, center.y + armPx},
+                       thicknessPx, color);
+    appendThickSegment(mesh, {center.x - armPx, center.y + armPx}, {center.x + armPx, center.y - armPx},
+                       thicknessPx, color);
+}
+
 bool pointInsideTownDisc(const Town& town, const Vec2& p) {
     return (p - town.center).length() <= town.radius + 1e-3f;
 }
@@ -253,7 +276,7 @@ void buildJunctionMesh(Town& town, float pixelsPerUnit, float radiusUnits) {
         const sf::Vector2f center{units::toPixels(junction.pos.x, pixelsPerUnit),
                                   units::toPixels(junction.pos.y, pixelsPerUnit)};
         const bool isCandidate =
-            town.bridgeCandidateJunctionIds.count(junction.id) != 0;
+            town.watersideJunctionIds.count(junction.id) != 0;
         appendJunctionDisc(town.junctionMesh, center, radiusPx,
                              isCandidate ? kBridgeCandidatePurple : sf::Color(255, 0, 0));
     }
@@ -1089,6 +1112,150 @@ void carveRoadWallForFootprint(Town& town, int roadId, int bankIndex,
     carveRoadWallForFootprint(town, roadId, bankIndex, mainFootprint, nullptr, false);
 }
 
+namespace {
+
+int otherJunctionOnRoad(const Road& road, int junctionId) {
+    if (road.junctionA == junctionId) {
+        return road.junctionB;
+    }
+    if (road.junctionB == junctionId) {
+        return road.junctionA;
+    }
+    return -1;
+}
+
+void collectBridgeBucketRoadsFromEndpoint(const Town& town, int bridgeRoadId,
+                                          int startJunctionId, int maxHops,
+                                          std::unordered_set<int>& out) {
+    if (startJunctionId < 0 || startJunctionId >= static_cast<int>(town.junctions.size())
+        || maxHops <= 0) {
+        return;
+    }
+
+    std::vector<int> hopDist(town.junctions.size(), -1);
+    std::deque<int>  queue;
+    hopDist[static_cast<std::size_t>(startJunctionId)] = 0;
+    queue.push_back(startJunctionId);
+
+    while (!queue.empty()) {
+        const int curJunctionId = queue.front();
+        queue.pop_front();
+        const int curHops = hopDist[static_cast<std::size_t>(curJunctionId)];
+
+        const Junction& junction =
+            town.junctions[static_cast<std::size_t>(curJunctionId)];
+        for (int roadId : junction.roadIds) {
+            if (roadId < 0 || roadId >= static_cast<int>(town.roads.size())
+                || roadId == bridgeRoadId) {
+                continue;
+            }
+            const Road& road = town.roads[static_cast<std::size_t>(roadId)];
+            if (road.isBridge) {
+                continue;
+            }
+
+            out.insert(roadId);
+
+            const int nextJunctionId = otherJunctionOnRoad(road, curJunctionId);
+            if (nextJunctionId < 0
+                || hopDist[static_cast<std::size_t>(nextJunctionId)] >= 0) {
+                continue;
+            }
+            const int nextHops = curHops + 1;
+            if (nextHops > maxHops) {
+                continue;
+            }
+            hopDist[static_cast<std::size_t>(nextJunctionId)] = nextHops;
+            queue.push_back(nextJunctionId);
+        }
+    }
+}
+
+void collectBridgeBucketRoads(const Town& town, int bridgeRoadId, int maxHops,
+                              std::unordered_set<int>& out) {
+    if (bridgeRoadId < 0 || bridgeRoadId >= static_cast<int>(town.roads.size())) {
+        return;
+    }
+    const Road& bridge = town.roads[static_cast<std::size_t>(bridgeRoadId)];
+    if (!bridge.isBridge) {
+        return;
+    }
+
+    collectBridgeBucketRoadsFromEndpoint(town, bridgeRoadId, bridge.junctionA, maxHops, out);
+    collectBridgeBucketRoadsFromEndpoint(town, bridgeRoadId, bridge.junctionB, maxHops, out);
+}
+
+int buildingInstanceRoadId(const BuildingInstance& instance) {
+    if (instance.roadId >= 0) {
+        return instance.roadId;
+    }
+    return instance.plot.roadId;
+}
+
+}  // namespace
+
+void buildBridgeBuckets(Town& town, int maxHops) {
+    town.bridgeBuckets.clear();
+    town.seedRevealBridgeRoadId = -1;
+
+    float seedDist = 1e30f;
+    for (const Road& road : town.roads) {
+        if (!road.isBridge) {
+            continue;
+        }
+
+        BridgeBucket bucket;
+        bucket.bridgeRoadId = road.id;
+        collectBridgeBucketRoads(town, road.id, maxHops, bucket.roadIds);
+        town.bridgeBuckets.push_back(std::move(bucket));
+
+        const Vec2 mid = (road.a + road.b) * 0.5f;
+        const float  d = (mid - town.center).length();
+        if (d < seedDist) {
+            seedDist                    = d;
+            town.seedRevealBridgeRoadId = road.id;
+        }
+    }
+
+    for (BridgeBucket& bucket : town.bridgeBuckets) {
+        if (bucket.bridgeRoadId == town.seedRevealBridgeRoadId) {
+            bucket.revealed = true;
+        }
+    }
+
+    Logger::log("bridge",
+                "bridge_buckets count=" + std::to_string(town.bridgeBuckets.size()) + " hops="
+                    + std::to_string(maxHops) + " seed_b="
+                    + std::to_string(town.seedRevealBridgeRoadId));
+}
+
+void updateBridgeRevealFromBuildings(Town& town) {
+    for (BridgeBucket& bucket : town.bridgeBuckets) {
+        if (bucket.revealed) {
+            continue;
+        }
+        for (const BuildingInstance& instance : town.buildingInstances) {
+            const int roadId = buildingInstanceRoadId(instance);
+            if (roadId >= 0 && bucket.roadIds.count(roadId) != 0) {
+                bucket.revealed = true;
+                Logger::log("bridge",
+                            "bridge_revealed b=" + std::to_string(bucket.bridgeRoadId)
+                                + " trigger_road=" + std::to_string(roadId));
+                break;
+            }
+        }
+    }
+}
+
+bool isBridgeRoadRevealed(const Town& town, int bridgeRoadId) {
+    for (const BridgeBucket& bucket : town.bridgeBuckets) {
+        if (bucket.bridgeRoadId == bridgeRoadId) {
+            return bucket.revealed;
+        }
+    }
+    return true;
+}
+
 void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,
                      const std::array<uint8_t, 3>& secondaryColor,
                      const std::array<uint8_t, 3>& bridgeColor, float pixelsPerUnit,
@@ -1098,12 +1265,18 @@ void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,
     const sf::Color bridgeSf(bridgeColor[0], bridgeColor[1], bridgeColor[2]);
     const float     thickness = 1.f * pixelsPerUnit;
 
+    updateBridgeRevealFromBuildings(town);
+
     town.roadMesh.setPrimitiveType(sf::Triangles);
     town.roadMesh.clear();
     town.roadLabels.clear();
 
     const bool clip = terrain != nullptr && terrain->valid && clipRoadsAtWater;
     for (const Road& road : town.roads) {
+        if (road.isBridge && !isBridgeRoadRevealed(town, road.id)) {
+            continue;
+        }
+
         const Vec2 mid = (road.a + road.b) * 0.5f;
         town.roadLabels.push_back(
             {road.id, mid.x * pixelsPerUnit, mid.y * pixelsPerUnit});
@@ -1128,6 +1301,110 @@ void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,
                                {landA.x * pixelsPerUnit, landA.y * pixelsPerUnit},
                                {landB.x * pixelsPerUnit, landB.y * pixelsPerUnit}, thickness,
                                color);
+        }
+    }
+
+    buildBridgeDebugView(town, pixelsPerUnit, bridgeColor);
+}
+
+void buildBridgeDebugView(Town& town, float pixelsPerUnit,
+                          const std::array<uint8_t, 3>& bridgeColor) {
+    const sf::Color bridgeSf(bridgeColor[0], bridgeColor[1], bridgeColor[2]);
+    const sf::Color kBridgeCandidatePurple(128, 0, 200);
+    const sf::Color kProbeCircle(255, 255, 255, 180);
+    const sf::Color kMissJunction(255, 64, 64);
+    const sf::Color kHitMark(255, 0, 0);
+    const float     bridgeThickness = 2.5f * pixelsPerUnit;
+    const float     junctionRadius  = units::toPixels(1.25f, pixelsPerUnit);
+    const float     probeRadiusPx =
+        units::toPixels(town.bridgeWatersideProbeRadius, pixelsPerUnit);
+    const float ringThickness = std::max(1.5f, pixelsPerUnit * 0.15f);
+    const float hitArmPx      = std::max(4.f, pixelsPerUnit * 0.45f);
+
+    town.bridgeRoadMesh.setPrimitiveType(sf::Triangles);
+    town.bridgeRoadMesh.clear();
+    town.bridgeProbeCircleMesh.setPrimitiveType(sf::Triangles);
+    town.bridgeProbeCircleMesh.clear();
+    town.bridgeProbeHitMesh.setPrimitiveType(sf::Triangles);
+    town.bridgeProbeHitMesh.clear();
+    town.bridgeCandidateJunctionMesh.setPrimitiveType(sf::Triangles);
+    town.bridgeCandidateJunctionMesh.clear();
+    town.bridgeDebugLabels.clear();
+
+    for (const Road& road : town.roads) {
+        if (!road.isBridge) {
+            continue;
+        }
+        if (!isBridgeRoadRevealed(town, road.id)) {
+            continue;
+        }
+
+        const Vec2 mid = (road.a + road.b) * 0.5f;
+        appendThickSegment(town.bridgeRoadMesh,
+                           {road.a.x * pixelsPerUnit, road.a.y * pixelsPerUnit},
+                           {road.b.x * pixelsPerUnit, road.b.y * pixelsPerUnit}, bridgeThickness,
+                           bridgeSf);
+
+        RotatedTextLabel label;
+        label.text        = "B" + std::to_string(road.id);
+        label.centerXPx   = mid.x * pixelsPerUnit;
+        label.centerYPx   = mid.y * pixelsPerUnit;
+        label.rotationDeg = 0.f;
+        town.bridgeDebugLabels.push_back(label);
+    }
+
+    const auto drawProbe = [&](const WatersideProbeDebug& probe) {
+        const sf::Vector2f center{units::toPixels(probe.pos.x, pixelsPerUnit),
+                                  units::toPixels(probe.pos.y, pixelsPerUnit)};
+        if (probe.probeRadius > 0.f) {
+            appendCircleRing(town.bridgeProbeCircleMesh, center, probeRadiusPx, ringThickness,
+                             kProbeCircle);
+        }
+        if (probe.hitValid) {
+            const sf::Vector2f hitCenter{units::toPixels(probe.hitPoint.x, pixelsPerUnit),
+                                         units::toPixels(probe.hitPoint.y, pixelsPerUnit)};
+            appendHitCross(town.bridgeProbeHitMesh, hitCenter, hitArmPx, ringThickness, kHitMark);
+        }
+
+        appendJunctionDisc(town.bridgeCandidateJunctionMesh, center, junctionRadius,
+                           probe.isWaterside ? kBridgeCandidatePurple : kMissJunction);
+
+        std::string text = "J" + std::to_string(probe.junctionId);
+        if (probe.junctionId >= 0
+            && probe.junctionId < static_cast<int>(town.junctions.size())) {
+            const Junction& junction =
+                town.junctions[static_cast<std::size_t>(probe.junctionId)];
+            if (!junction.roadIds.empty()) {
+                text += " R";
+                for (std::size_t i = 0; i < junction.roadIds.size(); ++i) {
+                    if (i > 0) {
+                        text += ',';
+                    }
+                    text += std::to_string(junction.roadIds[i]);
+                }
+            }
+        }
+
+        RotatedTextLabel label;
+        label.text        = text;
+        label.centerXPx   = center.x;
+        label.centerYPx   = center.y - 16.f;
+        label.rotationDeg = 0.f;
+        town.bridgeDebugLabels.push_back(label);
+    };
+
+    if (!town.watersideProbeDebug.empty()) {
+        for (const WatersideProbeDebug& probe : town.watersideProbeDebug) {
+            drawProbe(probe);
+        }
+    } else {
+        for (const Junction& junction : town.junctions) {
+            WatersideProbeDebug probe{};
+            probe.junctionId  = junction.id;
+            probe.pos         = junction.pos;
+            probe.probeRadius = town.bridgeWatersideProbeRadius;
+            probe.isWaterside = town.watersideJunctionIds.count(junction.id) != 0;
+            drawProbe(probe);
         }
     }
 }

@@ -252,6 +252,24 @@ struct RotatedTextLabel {
     float       rotationDeg = 0.f;
 };
 
+struct WatersideProbeDebug {
+    int       junctionId   = -1;
+    Vec2      pos{};
+    float     probeRadius  = 0.f;
+    bool      hitValid     = false;
+    Vec2      hitPoint{};
+    float     hitDist      = 0.f;
+    TerrainId hitKind      = kTerrainUnknown;
+    TerrainId junctionKind = kTerrainUnknown;
+    bool      isWaterside  = false;
+};
+
+struct BridgeBucket {
+    int                     bridgeRoadId = -1;
+    std::unordered_set<int> roadIds;
+    bool                    revealed     = false;
+};
+
 struct Town {
     std::vector<Road> roads;
     std::vector<Junction> junctions;
@@ -262,7 +280,11 @@ struct Town {
     int               frontageSegmentIdCounter = 0;
     int               wallSegmentIdCounter     = 0;
     sf::VertexArray   roadMesh{sf::Triangles};
-    std::unordered_set<int> bridgeCandidateJunctionIds;
+    std::unordered_set<int> watersideJunctionIds;
+    float             bridgeWatersideProbeRadius = 0.f;
+    std::vector<WatersideProbeDebug> watersideProbeDebug;
+    std::vector<BridgeBucket>          bridgeBuckets;
+    int                                seedRevealBridgeRoadId = -1;
     sf::VertexArray   junctionMesh{sf::Triangles};
     sf::VertexArray   roadEndProbeMesh{sf::Triangles};
     sf::VertexArray   frontageSegmentMesh{sf::Triangles};
@@ -305,6 +327,11 @@ struct Town {
     std::vector<FrontageSegmentLabel> plotLabels;
     std::vector<FrontageSegmentLabel> buildingLabels;
     std::vector<RotatedTextLabel>     terrainPlotTypeLabels;
+    sf::VertexArray   bridgeRoadMesh{sf::Triangles};
+    sf::VertexArray   bridgeProbeCircleMesh{sf::Triangles};
+    sf::VertexArray   bridgeProbeHitMesh{sf::Triangles};
+    sf::VertexArray   bridgeCandidateJunctionMesh{sf::Triangles};
+    std::vector<RotatedTextLabel> bridgeDebugLabels;
     std::vector<FrontageSegmentLabel> roadLabels;
     std::vector<FrontageSegmentLabel> frontageSegmentLabels;
     std::vector<FrontageSegmentLabel> roadEndProbeLabels;
@@ -372,10 +399,15 @@ void carveRoadWallForFootprint(Town& town, int roadId, int bankIndex,
                                const TerrainAtlas* terrain = nullptr, bool notifyFrontier = false);
 bool pointInsideTownDisc(const Town& town, const Vec2& p);
 bool roadFrameForBank(const Road& road, int bankIndex, Vec2& origin, Vec2& farEnd, Vec2& edgeDir);
+void buildBridgeBuckets(Town& town, int maxHops);
+void updateBridgeRevealFromBuildings(Town& town);
+bool isBridgeRoadRevealed(const Town& town, int bridgeRoadId);
 void rebuildRoadMesh(Town& town, const std::array<uint8_t, 3>& primaryColor,
                      const std::array<uint8_t, 3>& secondaryColor,
                      const std::array<uint8_t, 3>& bridgeColor, float pixelsPerUnit,
                      const TerrainAtlas* terrain, bool clipRoadsAtWater);
+void buildBridgeDebugView(Town& town, float pixelsPerUnit,
+                          const std::array<uint8_t, 3>& bridgeColor);
 void appendStripedSegment(sf::VertexArray& tris, const Vec2& a, const Vec2& b, float thickness,
                           const sf::Color& colorA, const sf::Color& colorB, float stripeLength);
 void appendJunctionDisc(sf::VertexArray& mesh, const sf::Vector2f& center, float radiusPx,

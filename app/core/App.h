@@ -36,7 +36,9 @@ private:
     void drawPlotLabels();
     void drawBuildingLabels();
     void drawRoadLabels();
+    void drawBridgeDebugLabels();
     void drawTerrainPlotTypeLabels();
+    void drawRotatedTextLabels(const std::vector<RotatedTextLabel>& labels, unsigned characterSize);
     void drawIdLabels(const std::vector<FrontageSegmentLabel>& labels);
     void drawIdLabels(const std::vector<FrontageSegmentLabel>& labels,
                       const std::unordered_set<int>* onlyIds);
@@ -62,6 +64,7 @@ private:
     TerrainOverlayMode  terrainOverlayMode_ = TerrainOverlayMode::TerrainAndDebug;
     bool                hopZoneTintEnabled_ = false;
     bool                showBiomePlots_     = false;
+    bool                showBridgeDebug_    = false;
     GrowthConfig        growthAuto_;
     bool                inAppAutoGrow_      = false;
     sf::Clock           autoGrowClock_;

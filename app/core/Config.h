@@ -86,8 +86,9 @@ struct TerrainConfig {
     bool        bridgeSnapEnabled         = false;
     float       bridgeSnapSearchRadius    = 0.f;
     float       bridgeMaxSpan             = 80.f;
-    float       bridgeOutlineMaxDist      = 6.f;
     float       shoreJunctionMergeDist    = 2.f;
+    float       bridgeWatersideMaxDist    = 4.f;
+    int         bridgeBucketHops          = 2;
 };
 
 struct GrowthConfig {

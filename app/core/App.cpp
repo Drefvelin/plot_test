@@ -47,6 +47,7 @@ App::App(const Config& config, const TownConfig& townConfig, const TerrainCatalo
     hud_.setTerrainControls(&terrainOverlayMode_, terrainAtlas_.valid);
     hud_.setZoneTintControl(&hopZoneTintEnabled_);
     hud_.setBiomePlotControl(&showBiomePlots_);
+    hud_.setBridgeDebugControl(&showBridgeDebug_, config.terrain.bridgesEnabled);
 }
 
 sf::Color App::toColor(const std::array<uint8_t, 3>& rgb) const {
@@ -221,18 +222,27 @@ void App::drawRoadLabels() {
 }
 
 void App::drawTerrainPlotTypeLabels() {
+    drawRotatedTextLabels(town_.terrainPlotTypeLabels, 10);
+}
+
+void App::drawBridgeDebugLabels() {
+    drawRotatedTextLabels(town_.bridgeDebugLabels, 11);
+}
+
+void App::drawRotatedTextLabels(const std::vector<RotatedTextLabel>& labels,
+                                unsigned characterSize) {
     if (!labelFontLoaded_) {
         return;
     }
 
-    for (const RotatedTextLabel& label : town_.terrainPlotTypeLabels) {
+    for (const RotatedTextLabel& label : labels) {
         sf::Text plotText;
         plotText.setFont(labelFont_);
         plotText.setString(label.text);
-        plotText.setCharacterSize(10);
+        plotText.setCharacterSize(characterSize);
         plotText.setFillColor(sf::Color::Black);
-        plotText.setOutlineColor(sf::Color(255, 255, 255, 220));
-        plotText.setOutlineThickness(1.5f);
+        plotText.setOutlineColor(sf::Color(255, 255, 255, 230));
+        plotText.setOutlineThickness(2.f);
         const sf::FloatRect bounds = plotText.getLocalBounds();
         plotText.setOrigin(bounds.left + bounds.width * 0.5f,
                            bounds.top + bounds.height * 0.5f);
@@ -404,6 +414,11 @@ int App::run() {
                 showBiomePlots_ = !showBiomePlots_;
             }
 
+            if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::B
+                && config_.terrain.bridgesEnabled) {
+                showBridgeDebug_ = !showBridgeDebug_;
+            }
+
             if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Z) {
                 hopZoneTintEnabled_ = !hopZoneTintEnabled_;
             }
@@ -453,6 +468,18 @@ int App::run() {
             && town_.placementQueueCursor < effectiveAutoGrowTarget();
         if (!skipDrawForAutoExit) {
         window_.setView(camera_.getView());
+        if (showBridgeDebug_ && config_.terrain.bridgesEnabled) {
+            if (terrainAtlas_.valid) {
+                window_.draw(terrainSprite_);
+            } else {
+                window_.draw(diagramSprite_);
+            }
+            window_.draw(town_.bridgeProbeCircleMesh);
+            window_.draw(town_.bridgeRoadMesh);
+            window_.draw(town_.bridgeCandidateJunctionMesh);
+            window_.draw(town_.bridgeProbeHitMesh);
+            drawBridgeDebugLabels();
+        } else {
         const bool drawDebug =
             terrainAtlas_.valid
             && (terrainOverlayMode_ == TerrainOverlayMode::TerrainAndDebug
@@ -503,6 +530,7 @@ int App::run() {
             }
         }
         drawRoadLabels();
+        }
         }
         window_.setView(window_.getDefaultView());
         hud_.draw(window_);

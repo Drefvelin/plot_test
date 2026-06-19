@@ -204,11 +204,14 @@ Config Config::load(const std::filesystem::path& path) {
         if (t["bridge_max_span"]) {
             config.terrain.bridgeMaxSpan = t["bridge_max_span"].as<float>();
         }
-        if (t["bridge_outline_max_dist"]) {
-            config.terrain.bridgeOutlineMaxDist = t["bridge_outline_max_dist"].as<float>();
-        }
         if (t["shore_junction_merge_dist"]) {
             config.terrain.shoreJunctionMergeDist = t["shore_junction_merge_dist"].as<float>();
+        }
+        if (t["bridge_waterside_max_dist"]) {
+            config.terrain.bridgeWatersideMaxDist = t["bridge_waterside_max_dist"].as<float>();
+        }
+        if (t["bridge_bucket_hops"]) {
+            config.terrain.bridgeBucketHops = std::max(0, t["bridge_bucket_hops"].as<int>());
         }
     }
 

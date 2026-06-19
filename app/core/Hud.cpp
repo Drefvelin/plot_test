@@ -114,6 +114,11 @@ void Hud::setBiomePlotControl(bool* biomePlotsEnabled) {
     biomePlotsEnabled_ = biomePlotsEnabled;
 }
 
+void Hud::setBridgeDebugControl(bool* bridgeDebugEnabled, bool bridgesEnabled) {
+    bridgeDebugEnabled_ = bridgeDebugEnabled;
+    bridgesEnabled_     = bridgesEnabled;
+}
+
 void Hud::setPlacementFailures(int count, int moveFailures, int placedCount, const Town& town) {
 
     placementFailures_ = count;
@@ -156,6 +161,8 @@ void Hud::updateLayout(const sf::Vector2u& windowSize) {
 
     biomeToggleTop_  = zoneToggleTop_;
     biomeToggleLeft_ = zoneToggleLeft_ - toggleGap_ - toggleWidth_;
+    bridgeToggleTop_  = biomeToggleTop_;
+    bridgeToggleLeft_ = biomeToggleLeft_ - toggleGap_ - toggleWidth_;
 
 }
 
@@ -185,6 +192,17 @@ void Hud::toggleBiomePlots() const {
         return;
     }
     *biomePlotsEnabled_ = !*biomePlotsEnabled_;
+}
+
+void Hud::toggleBridgeDebug() const {
+    if (bridgeDebugEnabled_ == nullptr || !bridgesEnabled_) {
+        return;
+    }
+    *bridgeDebugEnabled_ = !*bridgeDebugEnabled_;
+}
+
+bool Hud::bridgeDebugToggleHitTest(float x, float y) const {
+    return pointInRect(x, y, bridgeToggleLeft_, bridgeToggleTop_, toggleWidth_, toggleHeight_);
 }
 
 void Hud::toggleZoneTint() const {
@@ -268,6 +286,12 @@ bool Hud::handleEvent(const sf::Event& event, const sf::RenderWindow& window) {
 
 
     if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left) {
+
+        if (bridgesEnabled_ && bridgeDebugToggleHitTest(static_cast<float>(event.mouseButton.x),
+                                                       static_cast<float>(event.mouseButton.y))) {
+            toggleBridgeDebug();
+            return true;
+        }
 
         if (biomePlotToggleHitTest(static_cast<float>(event.mouseButton.x),
                                    static_cast<float>(event.mouseButton.y))) {
@@ -442,6 +466,9 @@ void Hud::draw(sf::RenderWindow& window) const {
     const bool biomeOn = biomePlotsEnabled_ != nullptr && *biomePlotsEnabled_;
     drawToggleButton(window, biomeToggleLeft_, biomeToggleTop_, toggleWidth_, toggleHeight_,
                      "Biome plots", biomeOn, true, fontPtr);
+    const bool bridgeOn = bridgeDebugEnabled_ != nullptr && *bridgeDebugEnabled_;
+    drawToggleButton(window, bridgeToggleLeft_, bridgeToggleTop_, toggleWidth_, toggleHeight_,
+                     "Bridges", bridgeOn, bridgesEnabled_, fontPtr);
 
     if (fontLoaded_) {
 

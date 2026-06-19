@@ -1,6 +1,6 @@
 # Simulation memory report
 
-Generated: 2026-06-19 12:10:21 | Buildings placed: 0 | Queue target: 0
+Generated: 2026-06-19 13:24:00 | Buildings placed: 2 | Queue target: 2
 
 > Capacity-based heap estimate. Excludes terrain image rasters, render caches, and debug-only data (alley probe history).
 
@@ -8,39 +8,39 @@ Generated: 2026-06-19 12:10:21 | Buildings placed: 0 | Queue target: 0
 
 | Component | Bytes | Human | % |
 |-----------|------:|------|--:|
-| Town | 139097 | 135.8 KB | 47.3 |
-| TerrainAtlas (geometry) | 132891 | 129.8 KB | 45.2 |
+| Town | 141215 | 137.9 KB | 47.7 |
+| TerrainAtlas (geometry) | 132891 | 129.8 KB | 44.8 |
 | DefCache | 4080 | 4.0 KB | 1.4 |
 | BuildingGrowthQueue | 15870 | 15.5 KB | 5.4 |
 | TownConfig | 544 | 544 B | 0.2 |
-| Config | 1662 | 1.6 KB | 0.6 |
-| **Grand total** | **294144** | **287.2 KB** | **100.0** |
+| Config | 1756 | 1.7 KB | 0.6 |
+| **Grand total** | **296356** | **289.4 KB** | **100.0** |
 
 ## Town detail
 
 | Struct / field | Bytes | Count |
 |----------------|------:|------:|
-| roads (fixed fields) | 67152 | 236 |
-| roads.sideA/B.segments | 5244 | 437 |
-| roads.sideA/B.wallSegments | 5244 | 437 |
-| roads.sideA/B.mainOccupancyT | 0 | 0 |
-| roads.sideA/B.depthCacheEntries | 0 | 0 |
-| junctions (fixed fields) | 10748 | 200 |
-| junctions[].roadIds | 1892 | 472 |
-| buildingInstances (fixed fields) | 0 | 0 |
-| buildingInstances[].plot | 0 | 0 |
-| buildingInstances[].footprints | 0 | 0 |
-| buildingInstances[].typeId | 0 | 0 |
+| roads (fixed fields) | 68534 | 241 |
+| roads.sideA/B.segments | 5268 | 439 |
+| roads.sideA/B.wallSegments | 5268 | 439 |
+| roads.sideA/B.mainOccupancyT | 8 | 1 |
+| roads.sideA/B.depthCacheEntries | 192 | 6 |
+| junctions (fixed fields) | 10712 | 203 |
+| junctions[].roadIds | 1928 | 482 |
+| buildingInstances (fixed fields) | 0 | 2 |
+| buildingInstances[].plot | 144 | 2 |
+| buildingInstances[].footprints | 288 | 3 |
+| buildingInstances[].typeId | 4 | 2 |
 | frontiers.plot[core] | 0 | 0 |
 | frontiers.wall[core] | 0 | 0 |
-| frontiers.plot[suburban] | 672 | 24 |
-| frontiers.wall[suburban] | 672 | 26 |
-| frontiers.plot[rural] | 11376 | 364 |
-| frontiers.wall[rural] | 11376 | 393 |
+| frontiers.plot[suburban] | 672 | 21 |
+| frontiers.wall[suburban] | 672 | 23 |
+| frontiers.plot[rural] | 11376 | 370 |
+| frontiers.wall[rural] | 11376 | 395 |
 | frontiers.alley | 0 | 0 |
-| frontierManager.border.sea | 2688 | 31 |
-| frontierManager.border.river | 2688 | 39 |
-| frontierManager.scan.plains | 15168 | 326 |
+| frontierManager.border.sea | 2688 | 30 |
+| frontierManager.border.river | 2688 | 41 |
+| frontierManager.scan.plains | 15168 | 329 |
 | frontierManager.scan.forest | 2016 | 44 |
 | frontierManager.scan.hills | 192 | 6 |
 | secondaryRoadRecords | 0 | 0 |
@@ -50,11 +50,11 @@ Generated: 2026-06-19 12:10:21 | Buildings placed: 0 | Queue target: 0
 | alleyCompleteRoadIds | 0 | 0 |
 | placementFailedIndices | 0 | 0 |
 | placementSkipReasonsSummary | 47 | 1 |
-| junctionHopCache | 800 | 0 |
-| roadHopCache | 944 | 0 |
+| junctionHopCache | 812 | 203 |
+| roadHopCache | 964 | 241 |
 | suburbanRoadListCache | 0 | 0 |
 | ruralRoadListCache | 0 | 0 |
-| ringAvgDistByHop | 80 | 0 |
+| ringAvgDistByHop | 100 | 25 |
 | town (scalars + flags) | 98 | 0 |
 
 ## TerrainAtlas geometry
@@ -86,6 +86,6 @@ Generated: 2026-06-19 12:10:21 | Buildings placed: 0 | Queue target: 0
 | terrainAtlas.raster | 2097152 | terrain image |
 | terrainAtlas.forbiddenDilated | 1048576 | dilated forbidden mask |
 | terrainAtlas.overlayTexture | 4194344 | SFML texture |
-| town.alleyProbesByQueueIndex | 0 | debug-only (not in Unreal sim) |
+| town.alleyProbesByQueueIndex | 48 | debug-only (not in Unreal sim) |
 | town.alleyProbeFailMesh | 0 | debug alley overlay |
-| town.renderMeshesAndLabels | 2739924 | render-only |
+| town.renderMeshesAndLabels | 2751384 | render-only |

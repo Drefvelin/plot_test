@@ -25,6 +25,7 @@ public:
 
     void setZoneTintControl(bool* zoneTintEnabled);
     void setBiomePlotControl(bool* biomePlotsEnabled);
+    void setBridgeDebugControl(bool* bridgeDebugEnabled, bool bridgesEnabled);
 
     void setPlacementFailures(int count, int moveFailures, int placedCount, const Town& town);
 
@@ -54,10 +55,12 @@ private:
 
     bool zoneToggleHitTest(float x, float y) const;
     bool biomePlotToggleHitTest(float x, float y) const;
+    bool bridgeDebugToggleHitTest(float x, float y) const;
 
     void cycleTerrainOverlayMode() const;
     void toggleZoneTint() const;
     void toggleBiomePlots() const;
+    void toggleBridgeDebug() const;
 
 
 
@@ -75,6 +78,8 @@ private:
 
     bool*               zoneTintEnabled_   = nullptr;
     bool*               biomePlotsEnabled_ = nullptr;
+    bool*               bridgeDebugEnabled_  = nullptr;
+    bool                bridgesEnabled_      = false;
     bool                terrainAtlasValid_ = false;
 
 
@@ -113,6 +118,8 @@ private:
 
     float biomeToggleLeft_   = 0.f;
     float biomeToggleTop_    = 0.f;
+    float bridgeToggleLeft_  = 0.f;
+    float bridgeToggleTop_   = 0.f;
 
     float toggleWidth_       = 120.f;
 

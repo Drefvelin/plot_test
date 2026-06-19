@@ -9,6 +9,7 @@
 #include <deque>
 #include <map>
 #include <set>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -334,10 +335,9 @@ void probeChainForParallelRoads(const CorridorChain& chain, const Town& town,
 }
 
 struct BridgeSettings {
-    bool  snapEnabled    = true;
-    float searchRadius   = 8.f;
-    float maxSpan        = 80.f;
-    float outlineMaxDist = 6.f;
+    bool  snapEnabled  = true;
+    float searchRadius = 8.f;
+    float maxSpan      = 80.f;
 };
 
 BridgeSettings resolveBridgeSettings(const Config& config) {
@@ -347,8 +347,6 @@ BridgeSettings resolveBridgeSettings(const Config& config) {
         config.terrain.bridgeSnapSearchRadius > 0.f ? config.terrain.bridgeSnapSearchRadius : 8.f;
     settings.maxSpan =
         config.terrain.bridgeMaxSpan > 0.f ? config.terrain.bridgeMaxSpan : 80.f;
-    settings.outlineMaxDist =
-        config.terrain.bridgeOutlineMaxDist > 0.f ? config.terrain.bridgeOutlineMaxDist : 6.f;
     return settings;
 }
 
@@ -701,35 +699,6 @@ OutlineHit nearestOutlineFrame(const Vec2& p, const TerrainAtlas& terrain, Terra
     return best;
 }
 
-WaterBodyRef classifyJunctionWaterBody(const Vec2& pos, const TerrainAtlas& terrain,
-                                       float outlineMaxDist) {
-    WaterBodyRef ref;
-    if (terrain.catalog == nullptr) {
-        return ref;
-    }
-
-    const TerrainId seaId   = terrain.catalog->resolveKey("sea");
-    const TerrainId riverId = terrain.catalog->resolveKey("river");
-
-    const OutlineHit seaHit   = nearestOutlineFrame(pos, terrain, seaId);
-    const OutlineHit riverHit = nearestOutlineFrame(pos, terrain, riverId);
-
-    const OutlineHit* chosen = nullptr;
-    if (riverHit.valid && riverHit.dist <= outlineMaxDist) {
-        chosen = &riverHit;
-    } else if (seaHit.valid && seaHit.dist <= outlineMaxDist) {
-        chosen = &seaHit;
-    }
-    if (chosen == nullptr) {
-        return ref;
-    }
-
-    ref.kind       = (chosen == &seaHit) ? seaId : riverId;
-    ref.graphIndex = chosen->graphIndex;
-    ref.valid      = true;
-    return ref;
-}
-
 bool junctionHasLandRoad(const Town& town, int junctionId, const TerrainAtlas& terrain) {
     if (junctionId < 0 || junctionId >= static_cast<int>(town.junctions.size())) {
         return false;
@@ -891,20 +860,150 @@ bool junctionsConnectedWithinHops(const Town& town, int fromId, int toId, int ma
     return false;
 }
 
-WaterBodyRef classifyShoreBridgeCandidate(const Junction& junction, const Town& town,
-                                          const TerrainAtlas& terrain,
-                                          const BridgeSettings& settings) {
-    WaterBodyRef ref =
-        classifyJunctionWaterBody(junction.pos, terrain, settings.outlineMaxDist);
-    if (ref.valid) {
+struct ForbiddenRasterHit {
+    TerrainId kind  = kTerrainUnknown;
+    Vec2      point{};
+    float     dist  = 1e30f;
+    bool      valid = false;
+};
+
+ForbiddenRasterHit probeNearestForbiddenTerrain(const TerrainAtlas& terrain, const Vec2& pos,
+                                                float radius) {
+    ForbiddenRasterHit hit;
+    if (!terrain.valid || terrain.catalog == nullptr || radius <= 0.f) {
+        return hit;
+    }
+
+    const auto trySample = [&](const Vec2& samplePos, float dist) {
+        const TerrainId kind = terrain.sample(samplePos);
+        if (!terrain.catalog->isForbidden(kind)) {
+            return;
+        }
+        if (!hit.valid || dist < hit.dist) {
+            hit.valid = true;
+            hit.dist  = dist;
+            hit.kind  = kind;
+            hit.point = samplePos;
+        }
+    };
+
+    trySample(pos, 0.f);
+    if (hit.valid) {
+        return hit;
+    }
+
+    constexpr float kStep = 0.25f;
+    const float     radiusSq = radius * radius;
+    for (float dx = -radius; dx <= radius + 1e-3f; dx += kStep) {
+        for (float dy = -radius; dy <= radius + 1e-3f; dy += kStep) {
+            const float distSq = dx * dx + dy * dy;
+            if (distSq > radiusSq + 1e-3f) {
+                continue;
+            }
+            trySample({pos.x + dx, pos.y + dy}, std::sqrt(distSq));
+        }
+    }
+
+    if (hit.dist > radius) {
+        hit.valid = false;
+    }
+    return hit;
+}
+
+WaterBodyRef nearestWatersideWaterBody(const Vec2& pos, const TerrainAtlas& terrain, float radius) {
+    WaterBodyRef ref;
+    if (terrain.catalog == nullptr || radius <= 0.f) {
         return ref;
     }
-    if (!junctionHasLandRoad(town, junction.id, terrain)) {
+
+    const ForbiddenRasterHit hit = probeNearestForbiddenTerrain(terrain, pos, radius);
+    if (!hit.valid) {
         return ref;
     }
-    // Sanitize insets shore stubs off the outline; allow a wider search.
-    const float extendedDist = std::max(settings.outlineMaxDist * 3.f, 24.f);
-    return classifyJunctionWaterBody(junction.pos, terrain, extendedDist);
+
+    ref.kind  = hit.kind;
+    ref.valid = true;
+    return ref;
+}
+
+std::string junctionRoadIds(const Town& town, int junctionId) {
+    if (junctionId < 0 || junctionId >= static_cast<int>(town.junctions.size())) {
+        return "-";
+    }
+    std::ostringstream oss;
+    const Junction& junction = town.junctions[static_cast<std::size_t>(junctionId)];
+    for (std::size_t i = 0; i < junction.roadIds.size(); ++i) {
+        if (i > 0) {
+            oss << ',';
+        }
+        oss << junction.roadIds[static_cast<std::size_t>(i)];
+    }
+    if (junction.roadIds.empty()) {
+        oss << '-';
+    }
+    return oss.str();
+}
+
+std::string junctionPosText(const Town& town, int junctionId) {
+    if (junctionId < 0 || junctionId >= static_cast<int>(town.junctions.size())) {
+        return "?,?";
+    }
+    const Vec2& pos = town.junctions[static_cast<std::size_t>(junctionId)].pos;
+    return std::to_string(pos.x) + "," + std::to_string(pos.y);
+}
+
+std::string vec2Text(const Vec2& v) {
+    return std::to_string(v.x) + "," + std::to_string(v.y);
+}
+
+void collectWatersideJunctionIds(Town& town, const TerrainAtlas& terrain, float radius) {
+    town.watersideJunctionIds.clear();
+    town.watersideProbeDebug.clear();
+    town.bridgeWatersideProbeRadius = radius;
+    if (!terrain.valid) {
+        return;
+    }
+
+    indexJunctions(town);
+
+    Logger::log("bridge",
+                "waterside_collect radius=" + std::to_string(radius) + " junctions="
+                    + std::to_string(town.junctions.size()) + " probe_step=0.25");
+
+    for (const Junction& junction : town.junctions) {
+        const ForbiddenRasterHit hit =
+            probeNearestForbiddenTerrain(terrain, junction.pos, radius);
+        const TerrainId junctionKind = terrain.sample(junction.pos);
+
+        WatersideProbeDebug debug{};
+        debug.junctionId   = junction.id;
+        debug.pos          = junction.pos;
+        debug.probeRadius  = radius;
+        debug.hitValid     = hit.valid;
+        debug.hitPoint     = hit.point;
+        debug.hitDist      = hit.dist;
+        debug.hitKind      = hit.kind;
+        debug.junctionKind = junctionKind;
+        debug.isWaterside  = hit.valid;
+        town.watersideProbeDebug.push_back(debug);
+
+        if (!hit.valid) {
+            continue;
+        }
+
+        town.watersideJunctionIds.insert(junction.id);
+        Logger::log("bridge",
+                    "waterside j=" + std::to_string(junction.id) + " pos="
+                        + vec2Text(junction.pos) + " roads=" + junctionRoadIds(town, junction.id)
+                        + " radius=" + std::to_string(radius) + " raster_dist="
+                        + std::to_string(hit.dist) + " hit_kind="
+                        + (terrain.catalog != nullptr ? terrain.catalog->name(hit.kind)
+                                                      : "unknown")
+                        + " hit_point=" + vec2Text(hit.point) + " junction_sample="
+                        + (terrain.catalog != nullptr ? terrain.catalog->name(junctionKind)
+                                                      : "unknown"));
+    }
+    Logger::log("bridge", "waterside_count=" + std::to_string(town.watersideJunctionIds.size()));
 }
 
 bool shoresMayBridge(const ShoreJunction& a, const ShoreJunction& b, const Vec2& posA,
@@ -1015,7 +1114,7 @@ bool isValidBridgePair(int ja, int jb, const Town& town, const TerrainAtlas& ter
     if (junctionsConnectedWithinHops(town, ja, jb, kBridgeSameSideMaxHops)) {
         return false;
     }
-    return segmentInteriorMostlyWater(posA, posB, terrain);
+    return true;
 }
 
 float bridgePairSpan(const Town& town, int ja, int jb) {
@@ -1024,10 +1123,11 @@ float bridgePairSpan(const Town& town, int ja, int jb) {
     return (posB - posA).length();
 }
 
-bool endpointHasBetterPendingPartner(int endpoint, int currentPartner, std::size_t currentIdx,
-                                     const std::vector<BridgeCandidate>& candidates,
-                                     const std::vector<char>& matched, const Town& town,
-                                     const TerrainAtlas& terrain, const BridgeSettings& settings,
+bool endpointHasBetterAvailablePartner(int endpoint, int currentPartner,
+                                     const std::vector<char>& matched,
+                                     const std::vector<ShoreJunction>& shoreJunctions,
+                                     const Town& town, const TerrainAtlas& terrain,
+                                     const BridgeSettings& settings,
                                      const ShoreBridgeLookup& lookup) {
     if (endpoint < 0 || currentPartner < 0) {
         return false;
@@ -1035,28 +1135,141 @@ bool endpointHasBetterPendingPartner(int endpoint, int currentPartner, std::size
 
     const float currentSep = bridgePairSpan(town, endpoint, currentPartner);
 
-    for (std::size_t j = currentIdx + 1; j < candidates.size(); ++j) {
-        const BridgeCandidate& future = candidates[j];
-        int                    other  = -1;
-        if (future.ja == endpoint) {
-            other = future.jb;
-        } else if (future.jb == endpoint) {
-            other = future.ja;
-        } else {
+    for (const ShoreJunction& shore : shoreJunctions) {
+        const int jk = shore.junctionId;
+        if (jk == endpoint || jk == currentPartner) {
             continue;
         }
-        if (other == currentPartner || other < 0 || other >= static_cast<int>(matched.size())
-            || matched[static_cast<std::size_t>(other)] != 0) {
+        if (jk < 0 || jk >= static_cast<int>(matched.size())
+            || matched[static_cast<std::size_t>(jk)] != 0) {
             continue;
         }
-        if (!isValidBridgePair(endpoint, other, town, terrain, settings, lookup)) {
+        if (!isValidBridgePair(endpoint, jk, town, terrain, settings, lookup)) {
             continue;
         }
-        if (bridgePairSpan(town, endpoint, other) < currentSep - 1e-3f) {
+        if (bridgePairSpan(town, endpoint, jk) < currentSep - 1e-3f) {
             return true;
         }
     }
     return false;
+}
+
+bool endpointHasBetterSameBankForPartner(int endpoint, int currentPartner,
+                                         const std::vector<ShoreJunction>& shoreJunctions,
+                                         const Town& town) {
+    if (endpoint < 0 || currentPartner < 0) {
+        return false;
+    }
+
+    const float endpointSep = bridgePairSpan(town, endpoint, currentPartner);
+
+    for (const ShoreJunction& shore : shoreJunctions) {
+        const int jk = shore.junctionId;
+        if (jk == endpoint || jk == currentPartner) {
+            continue;
+        }
+        if (!junctionsConnectedWithinHops(town, endpoint, jk, kBridgeSameSideMaxHops)) {
+            continue;
+        }
+        if (bridgePairSpan(town, jk, currentPartner) < endpointSep - 1e-3f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string findBetterAvailablePartnerReason(int endpoint, int currentPartner,
+                                             const std::vector<char>& matched,
+                                             const std::vector<ShoreJunction>& shoreJunctions,
+                                             const Town& town, const TerrainAtlas& terrain,
+                                             const BridgeSettings& settings,
+                                             const ShoreBridgeLookup& lookup) {
+    if (endpoint < 0 || currentPartner < 0) {
+        return {};
+    }
+    const float currentSep = bridgePairSpan(town, endpoint, currentPartner);
+    int         bestJk     = -1;
+    float       bestSep    = currentSep;
+    for (const ShoreJunction& shore : shoreJunctions) {
+        const int jk = shore.junctionId;
+        if (jk == endpoint || jk == currentPartner) {
+            continue;
+        }
+        if (jk < 0 || jk >= static_cast<int>(matched.size())
+            || matched[static_cast<std::size_t>(jk)] != 0) {
+            continue;
+        }
+        if (!isValidBridgePair(endpoint, jk, town, terrain, settings, lookup)) {
+            continue;
+        }
+        const float sep = bridgePairSpan(town, endpoint, jk);
+        if (sep < bestSep - 1e-3f) {
+            bestSep = sep;
+            bestJk  = jk;
+        }
+    }
+    if (bestJk < 0) {
+        return {};
+    }
+    return "closer_partner jk=" + std::to_string(bestJk) + " span=" + std::to_string(bestSep)
+           + " roads=" + junctionRoadIds(town, bestJk);
+}
+
+std::string findBetterSameBankReason(int endpoint, int currentPartner,
+                                     const std::vector<ShoreJunction>& shoreJunctions,
+                                     const Town& town) {
+    if (endpoint < 0 || currentPartner < 0) {
+        return {};
+    }
+    const float endpointSep = bridgePairSpan(town, endpoint, currentPartner);
+    int         bestJk      = -1;
+    float       bestSep     = endpointSep;
+    for (const ShoreJunction& shore : shoreJunctions) {
+        const int jk = shore.junctionId;
+        if (jk == endpoint || jk == currentPartner) {
+            continue;
+        }
+        if (!junctionsConnectedWithinHops(town, endpoint, jk, kBridgeSameSideMaxHops)) {
+            continue;
+        }
+        const float sep = bridgePairSpan(town, jk, currentPartner);
+        if (sep < bestSep - 1e-3f) {
+            bestSep = sep;
+            bestJk  = jk;
+        }
+    }
+    if (bestJk < 0) {
+        return {};
+    }
+    return "same_bank jk=" + std::to_string(bestJk) + " span=" + std::to_string(bestSep)
+           + " roads=" + junctionRoadIds(town, bestJk);
+}
+
+std::string bridgePairRejectReason(int ja, int jb, const Town& town, const TerrainAtlas& terrain,
+                                   const BridgeSettings& settings,
+                                   const ShoreBridgeLookup& lookup) {
+    if (ja < 0 || jb < 0 || ja == jb || ja >= static_cast<int>(lookup.byJunctionId.size())
+        || jb >= static_cast<int>(lookup.byJunctionId.size())) {
+        return "bounds";
+    }
+    const ShoreJunction* shoreA = lookup.byJunctionId[static_cast<std::size_t>(ja)];
+    const ShoreJunction* shoreB = lookup.byJunctionId[static_cast<std::size_t>(jb)];
+    if (shoreA == nullptr || shoreB == nullptr) {
+        return "not_shore";
+    }
+    const Vec2& posA = town.junctions[static_cast<std::size_t>(ja)].pos;
+    const Vec2& posB = town.junctions[static_cast<std::size_t>(jb)].pos;
+    if (!shoresMayBridge(*shoreA, *shoreB, posA, posB, terrain)) {
+        return "body";
+    }
+    const float span = (posB - posA).length();
+    if (span > settings.maxSpan || span < kMinSegmentLen) {
+        return "span";
+    }
+    if (junctionsConnectedWithinHops(town, ja, jb, kBridgeSameSideMaxHops)) {
+        return "same_side";
+    }
+    return {};
 }
 
 }  // namespace
@@ -1165,7 +1378,7 @@ void splitRoadsAtIntersections(Town& town, float endpointEps) {
     (void)endpointEps;
 }
 
-void sanitizeRoadGraphAtWater(Town& town, const TerrainAtlas& terrain) {
+void sanitizeRoadGraphAtWater(Town& town, const TerrainAtlas& terrain, const Config& config) {
     if (!terrain.valid) {
         return;
     }
@@ -1234,6 +1447,12 @@ void sanitizeRoadGraphAtWater(Town& town, const TerrainAtlas& terrain) {
                 "water_sanitize boundary_splits=" + std::to_string(boundarySplits) + " removed="
                     + std::to_string(removed) + " split_multiland=" + std::to_string(splitMultiland)
                     + " junctions_snapped=" + std::to_string(junctionsSnapped));
+    Logger::log("bridge",
+                "sanitize boundary_splits=" + std::to_string(boundarySplits) + " removed="
+                    + std::to_string(removed) + " split_multiland=" + std::to_string(splitMultiland)
+                    + " junctions_snapped=" + std::to_string(junctionsSnapped));
+
+    collectWatersideJunctionIds(town, terrain, config.terrain.bridgeWatersideMaxDist);
 }
 
 int findUnionRoot(std::vector<int>& parent, int x) {
@@ -1319,22 +1538,21 @@ void mergeWatersideJunctions(Town& town, const TerrainAtlas& terrain, const Conf
 
     indexJunctions(town);
 
-    const BridgeSettings settings = resolveBridgeSettings(config);
-
     std::vector<int> shoreIds;
-    shoreIds.reserve(town.junctions.size());
-    for (const Junction& junction : town.junctions) {
-        const WaterBodyRef waterBody =
-            classifyShoreBridgeCandidate(junction, town, terrain, settings);
-        if (!waterBody.valid || !junctionHasLandRoad(town, junction.id, terrain)) {
-            continue;
+    shoreIds.reserve(town.watersideJunctionIds.size());
+    for (int junctionId : town.watersideJunctionIds) {
+        if (junctionId >= 0 && junctionId < static_cast<int>(town.junctions.size())
+            && junctionHasLandRoad(town, junctionId, terrain)) {
+            shoreIds.push_back(junctionId);
         }
-        shoreIds.push_back(junction.id);
     }
 
     if (shoreIds.size() < 2) {
+        collectWatersideJunctionIds(town, terrain, config.terrain.bridgeWatersideMaxDist);
         return;
     }
+
+    (void)resolveBridgeSettings(config);
 
     const int junctionCount = static_cast<int>(town.junctions.size());
     std::vector<int> parent(static_cast<std::size_t>(junctionCount));
@@ -1381,9 +1599,22 @@ void mergeWatersideJunctions(Town& town, const TerrainAtlas& terrain, const Conf
             updateJunctionPosition(town, junctionId, centroid);
         }
         mergedJunctions += static_cast<int>(cluster.size()) - 1;
+
+        std::ostringstream members;
+        for (std::size_t i = 0; i < cluster.size(); ++i) {
+            if (i > 0) {
+                members << ',';
+            }
+            members << cluster[i];
+        }
+        Logger::log("bridge",
+                    "merge_cluster members=" + members.str() + " centroid="
+                        + std::to_string(centroid.x) + "," + std::to_string(centroid.y)
+                        + " roads=" + junctionRoadIds(town, cluster[0]));
     }
 
     if (clustersMerged == 0) {
+        Logger::log("bridge", "merge none merge_dist=" + std::to_string(mergeDist));
         return;
     }
 
@@ -1395,6 +1626,13 @@ void mergeWatersideJunctions(Town& town, const TerrainAtlas& terrain, const Conf
                     + " merged_junctions=" + std::to_string(mergedJunctions) + " removed_roads="
                     + std::to_string(removedRoads) + " merge_dist="
                     + std::to_string(mergeDist));
+    Logger::log("bridge",
+                "merge_summary clusters=" + std::to_string(clustersMerged)
+                    + " merged_junctions=" + std::to_string(mergedJunctions) + " removed_roads="
+                    + std::to_string(removedRoads) + " merge_dist="
+                    + std::to_string(mergeDist));
+
+    collectWatersideJunctionIds(town, terrain, config.terrain.bridgeWatersideMaxDist);
 }
 
 void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& config) {
@@ -1402,25 +1640,40 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
         return;
     }
 
+    Logger::log("bridge", "resolve_start max_span=" + std::to_string(config.terrain.bridgeMaxSpan)
+                              + " merge_dist="
+                              + std::to_string(config.terrain.shoreJunctionMergeDist)
+                              + " waterside_junctions="
+                              + std::to_string(town.watersideJunctionIds.size()));
+
     indexJunctions(town);
-    town.bridgeCandidateJunctionIds.clear();
 
     const BridgeSettings settings = resolveBridgeSettings(config);
 
     std::vector<ShoreJunction> shoreJunctions;
-    shoreJunctions.reserve(town.junctions.size());
+    shoreJunctions.reserve(town.watersideJunctionIds.size());
 
-    for (const Junction& junction : town.junctions) {
+    for (int junctionId : town.watersideJunctionIds) {
+        if (junctionId < 0 || junctionId >= static_cast<int>(town.junctions.size())) {
+            continue;
+        }
+        if (!junctionHasLandRoad(town, junctionId, terrain)) {
+            continue;
+        }
+        const Junction& junction = town.junctions[static_cast<std::size_t>(junctionId)];
         const WaterBodyRef waterBody =
-            classifyShoreBridgeCandidate(junction, town, terrain, settings);
+            nearestWatersideWaterBody(junction.pos, terrain, config.terrain.bridgeWatersideMaxDist);
         if (!waterBody.valid) {
+            Logger::log("bridge",
+                        "candidate_skip j=" + std::to_string(junctionId) + " reason=no_water_body");
             continue;
         }
-        if (!junctionHasLandRoad(town, junction.id, terrain)) {
-            continue;
-        }
-        shoreJunctions.push_back({junction.id, waterBody});
-        town.bridgeCandidateJunctionIds.insert(junction.id);
+        shoreJunctions.push_back({junctionId, waterBody});
+        Logger::log("bridge",
+                    "candidate j=" + std::to_string(junctionId) + " pos="
+                        + junctionPosText(town, junctionId) + " roads="
+                        + junctionRoadIds(town, junctionId) + " water="
+                        + std::to_string(waterBody.graphIndex));
     }
 
     int shoreSea   = 0;
@@ -1439,7 +1692,6 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
     int rejectedBody     = 0;
     int rejectedSpan     = 0;
     int rejectedSameSide = 0;
-    int rejectedNotWater = 0;
     for (std::size_t i = 0; i < shoreJunctions.size(); ++i) {
         const int   ja   = shoreJunctions[i].junctionId;
         const Vec2& posA = town.junctions[static_cast<std::size_t>(ja)].pos;
@@ -1459,13 +1711,19 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
                 ++rejectedSameSide;
                 continue;
             }
-            if (!segmentInteriorMostlyWater(posA, posB, terrain)) {
-                ++rejectedNotWater;
-                continue;
-            }
             candidates.push_back({ja, jb, span});
+            Logger::log("bridge",
+                        "pair_ok ja=" + std::to_string(ja) + " jb=" + std::to_string(jb)
+                            + " span=" + std::to_string(span) + " roads_ja="
+                            + junctionRoadIds(town, ja) + " roads_jb=" + junctionRoadIds(town, jb));
         }
     }
+
+    Logger::log("bridge",
+                "pair_summary valid=" + std::to_string(candidates.size()) + " reject_body="
+                    + std::to_string(rejectedBody) + " reject_span="
+                    + std::to_string(rejectedSpan) + " reject_same_side="
+                    + std::to_string(rejectedSameSide));
 
     std::sort(candidates.begin(), candidates.end(),
               [](const BridgeCandidate& a, const BridgeCandidate& b) { return a.length < b.length; });
@@ -1495,12 +1753,38 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
                 continue;
             }
 
-            if (endpointHasBetterPendingPartner(candidate.jb, candidate.ja, i, candidates,
-                                                junctionMatched, town, terrain, settings, lookup)
-                || endpointHasBetterPendingPartner(candidate.ja, candidate.jb, i, candidates,
-                                                   junctionMatched, town, terrain, settings,
-                                                   lookup)) {
+            if (endpointHasBetterAvailablePartner(candidate.jb, candidate.ja, junctionMatched,
+                                                  shoreJunctions, town, terrain, settings, lookup)
+                || endpointHasBetterAvailablePartner(candidate.ja, candidate.jb, junctionMatched,
+                                                     shoreJunctions, town, terrain, settings,
+                                                     lookup)
+                || endpointHasBetterSameBankForPartner(candidate.jb, candidate.ja, shoreJunctions,
+                                                     town)
+                || endpointHasBetterSameBankForPartner(candidate.ja, candidate.jb, shoreJunctions,
+                                                       town)) {
                 ++deferred;
+                std::string reason =
+                    findBetterAvailablePartnerReason(candidate.jb, candidate.ja, junctionMatched,
+                                                     shoreJunctions, town, terrain, settings,
+                                                     lookup);
+                if (reason.empty()) {
+                    reason = findBetterAvailablePartnerReason(
+                        candidate.ja, candidate.jb, junctionMatched, shoreJunctions, town, terrain,
+                        settings, lookup);
+                }
+                if (reason.empty()) {
+                    reason = findBetterSameBankReason(candidate.jb, candidate.ja, shoreJunctions,
+                                                      town);
+                }
+                if (reason.empty()) {
+                    reason = findBetterSameBankReason(candidate.ja, candidate.jb, shoreJunctions,
+                                                      town);
+                }
+                Logger::log("bridge",
+                            "defer pass=" + std::to_string(pass) + " ja="
+                                + std::to_string(candidate.ja) + " jb="
+                                + std::to_string(candidate.jb) + " span="
+                                + std::to_string(candidate.length) + " " + reason);
                 continue;
             }
 
@@ -1511,6 +1795,10 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
             Vec2 bridgeB = origB;
             if (!findBestBridgeChord(origA, origB, terrain, settings, bridgeA, bridgeB)) {
                 ++rejectedSnap;
+                Logger::log("bridge",
+                            "snap_fail ja=" + std::to_string(candidate.ja) + " jb="
+                                + std::to_string(candidate.jb) + " span="
+                                + std::to_string(candidate.length));
                 continue;
             }
 
@@ -1531,6 +1819,14 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
             if (snapped) {
                 ++bridgesSnapped;
             }
+            Logger::log("bridge",
+                        "placed road_id=" + std::to_string(bridge.id) + " ja="
+                            + std::to_string(candidate.ja) + " jb="
+                            + std::to_string(candidate.jb) + " span="
+                            + std::to_string(candidate.length) + " snapped="
+                            + std::to_string(snapped ? 1 : 0) + " roads_ja="
+                            + junctionRoadIds(town, candidate.ja) + " roads_jb="
+                            + junctionRoadIds(town, candidate.jb));
             progress = true;
         }
         if (!progress) {
@@ -1553,10 +1849,17 @@ void resolveBridges(Town& town, const TerrainAtlas& terrain, const Config& confi
                     + std::to_string(shoreRiver) + " reject_body="
                     + std::to_string(rejectedBody) + " reject_span="
                     + std::to_string(rejectedSpan) + " reject_same_side="
-                    + std::to_string(rejectedSameSide) + " reject_not_water="
-                    + std::to_string(rejectedNotWater) + " reject_snap="
+                    + std::to_string(rejectedSameSide) + " reject_snap="
                     + std::to_string(rejectedSnap) + " deferred="
                     + std::to_string(deferred));
+    Logger::log("bridge",
+                "resolve_summary candidates=" + std::to_string(candidates.size()) + " created="
+                    + std::to_string(bridgesCreated) + " snapped="
+                    + std::to_string(bridgesSnapped) + " shore_junctions="
+                    + std::to_string(shoreJunctions.size()) + " reject_snap="
+                    + std::to_string(rejectedSnap) + " deferred=" + std::to_string(deferred));
+
+    collectWatersideJunctionIds(town, terrain, config.terrain.bridgeWatersideMaxDist);
 }
 
 void cullVoronoiRoadsParallelToCorridors(Town& town, const Config& config) {

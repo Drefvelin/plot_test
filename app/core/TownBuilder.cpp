@@ -341,7 +341,7 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain,
     const int roadsAfterSplit = static_cast<int>(town.roads.size());
 
     if (terrain != nullptr) {
-        sanitizeRoadGraphAtWater(town, *terrain);
+        sanitizeRoadGraphAtWater(town, *terrain, config);
         mergeWatersideJunctions(town, *terrain, config);
         if (config.terrain.bridgesEnabled) {
             resolveBridges(town, *terrain, config);
@@ -358,6 +358,7 @@ Town TownBuilder::build(const Config& config, const TerrainAtlas* terrain,
         }
     }
 
+    buildBridgeBuckets(town, config.terrain.bridgeBucketHops);
     buildRoadMesh(town, config, terrain);
     assignRoadSideInwards(town, terrain);
     buildJunctionMesh(town, ppu, 1.f);
